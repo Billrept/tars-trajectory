@@ -1,0 +1,13 @@
+# Keeps the SHA-pinned GitHub Actions and the Docker base images current.
+# Python and Bun dependencies are pinned by requirements.lock and bun.lock
+# and are updated deliberately, so they're not listed here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directories: ["/services", "/frontend"]
+    schedule:
+      interval: weekly
