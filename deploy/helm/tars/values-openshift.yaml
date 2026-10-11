@@ -1,0 +1,8 @@
+# Layer on top of staging/production values for Red Hat OpenShift on IBM Cloud:
+#   helm upgrade --install tars deploy/helm/tars -f values-production.yaml -f values-openshift.yaml
+platform: openshift
+ingress:
+  className: ""
+networkPolicy:
+  ingressNamespaceSelector:
+    network.openshift.io/policy-group: ingress

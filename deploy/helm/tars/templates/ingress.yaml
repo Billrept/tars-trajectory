@@ -1,0 +1,35 @@
+{{- if .Values.ingress.enabled }}
+{{- /* Only these prefixes are routed. /internal/* (service-to-service dataset API)
+       and the legacy unversioned paths are never reachable from outside. */ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "tars.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - hosts: [{{ $.Values.ingress.host | quote }}]
+      secretName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- range $path, $svc := dict "/api/v1/ephemeris" "ephemeris" "/api/v1/trajectory" "trajectory" "/api/v1/jobs" "jobs" "/" "frontend" }}
+          - path: {{ $path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-{{ $svc }}
+                port: {name: http}
+          {{- end }}
+{{- end }}

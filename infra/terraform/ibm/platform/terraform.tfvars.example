@@ -1,0 +1,5 @@
+prefix              = "tars-prod"
+region              = "jp-tok"
+resource_group_name = "Default"
+platform            = "openshift" # or "iks"
+workers_per_zone    = 1           # 3 zones x 1 = 3 workers

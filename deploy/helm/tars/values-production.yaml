@@ -1,0 +1,15 @@
+# Production: at least two replicas of every request-serving service, spread across zones,
+# with CPU autoscaling and PodDisruptionBudgets. The worker scales on CPU here; scale it on
+# queue depth with KEDA (Redis list length) if the cluster runs KEDA.
+config:
+  appEnv: production
+  publicOrigin: https://tars.example.com
+ingress:
+  host: tars.example.com
+services:
+  ephemeris: {autoscaling: {enabled: true, min: 2, max: 6, cpu: 70}}
+  trajectory: {autoscaling: {enabled: true, min: 2, max: 8, cpu: 70}}
+  jobs: {autoscaling: {enabled: true, min: 2, max: 4, cpu: 70}}
+  outbox: {replicas: 2}
+  worker: {autoscaling: {enabled: true, min: 2, max: 6, cpu: 80}}
+  frontend: {autoscaling: {enabled: true, min: 2, max: 4, cpu: 70}}

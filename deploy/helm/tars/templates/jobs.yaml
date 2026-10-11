@@ -1,0 +1,92 @@
+{{- /* Schema bootstrap before every install/upgrade; dataset loader on first install
+       (both hooks run before Deployments, so ephemeris becomes ready with a dataset);
+       a CronJob refreshes the dataset. */ -}}
+{{- $root := . }}
+{{- define "tars.batchPod" -}}
+automountServiceAccountToken: false
+enableServiceLinks: false
+restartPolicy: Never
+{{- with .root.Values.image.pullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+securityContext:
+  {{- include "tars.podSecurity" .root | nindent 2 }}
+containers:
+  - name: {{ .name }}
+    image: {{ include "tars.image" (dict "root" .root "image" .image) }}
+    imagePullPolicy: {{ .root.Values.image.pullPolicy }}
+    command: {{ toJson .command }}
+    env:
+      {{- include "tars.env" .root | nindent 6 }}
+      - {name: EPHEMERIS_START, value: {{ .root.Values.config.ephemerisStart | quote }}}
+      - {name: EPHEMERIS_END, value: {{ .root.Values.config.ephemerisEnd | quote }}}
+    envFrom:
+      {{- include "tars.envFrom" .root | nindent 6 }}
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: "1", memory: 768Mi}
+    securityContext:
+      {{- include "tars.containerSecurity" .root | nindent 6 }}
+    volumeMounts:
+      {{- include "tars.volumeMounts" .root | nindent 6 }}
+volumes:
+  {{- include "tars.volumes" .root | nindent 2 }}
+{{- end }}
+{{- if .Values.bootstrap.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-bootstrap
+  labels:
+    {{- include "tars.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      {{- include "tars.batchPod" (dict "root" $root "name" "bootstrap" "image" "jobs" "command" (list "python" "-m" "jobs_service.bootstrap")) | nindent 6 }}
+{{- end }}
+{{- if .Values.loader.onInstall }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-loader-initial
+  labels:
+    {{- include "tars.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.loader.activeDeadlineSeconds }}
+  template:
+    spec:
+      {{- include "tars.batchPod" (dict "root" $root "name" "loader" "image" "ephemeris" "command" (list "python" "-m" "ephemeris_service.loader")) | nindent 6 }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-loader
+  labels:
+    {{- include "tars.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.loader.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ .Values.loader.activeDeadlineSeconds }}
+      template:
+        spec:
+          {{- include "tars.batchPod" (dict "root" $root "name" "loader" "image" "ephemeris" "command" (list "python" "-m" "ephemeris_service.loader")) | nindent 10 }}

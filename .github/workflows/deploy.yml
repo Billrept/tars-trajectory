@@ -1,0 +1,98 @@
+# Reusable deploy to an IBM Cloud cluster (IKS or Red Hat OpenShift on IBM Cloud).
+# Called by ci.yml after images are published. Everything environment-specific lives in the
+# GitHub environment (staging / production): its protection rules gate production, and
+# its secrets/variables keep cluster details out of the repository.
+#
+# Environment secret:   IBM_CLOUD_API_KEY   (Service ID key: Writer on the cluster namespace only)
+# Environment variables: IBM_REGION, IBM_RESOURCE_GROUP, IBM_CLUSTER, K8S_NAMESPACE,
+#   TARS_PLATFORM (kubernetes|openshift), TARS_HOST, TARS_INGRESS_CLASS, TARS_INGRESS_TLS_SECRET,
+#   TARS_S3_ENDPOINT, TARS_DATASET_BUCKET, TARS_RESULT_BUCKET, TARS_TRUSTED_PROXY_HOPS
+# The last four come from `terraform output helm_values` in infra/terraform/ibm/cluster.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      values_file:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment:
+      name: ${{ inputs.environment }}
+      url: https://${{ vars.TARS_HOST }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false # never interrupt a rollout halfway
+    env:
+      CHART: deploy/helm/tars
+      REGISTRY: ghcr.io/${{ github.repository }}
+      IMAGE_TAG: sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
+      - name: Install IBM Cloud CLI
+        run: |
+          curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+          ibmcloud plugin install container-service -f -q
+      - name: Log in and fetch cluster credentials
+        env:
+          IBMCLOUD_API_KEY: ${{ secrets.IBM_CLOUD_API_KEY }}
+        run: |
+          ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "${{ vars.IBM_REGION }}" -g "${{ vars.IBM_RESOURCE_GROUP }}" -q
+          ibmcloud ks cluster config --cluster "${{ vars.IBM_CLUSTER }}" --admin -q
+      - name: Resolve image digests for this commit
+        run: |
+          # Deploy by digest: the exact bytes CI tested, even if a tag is later moved.
+          registry=$(echo "$REGISTRY" | tr '[:upper:]' '[:lower:]')
+          { echo "image: {registry: $registry}"; echo "images:"; } > "$RUNNER_TEMP/images.yaml"
+          for image in ephemeris trajectory jobs worker frontend; do
+            digest=$(docker buildx imagetools inspect "$registry/$image:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
+            echo "  $image: {digest: $digest}" >> "$RUNNER_TEMP/images.yaml"
+          done
+          cat "$RUNNER_TEMP/images.yaml"
+      - name: Helm upgrade (atomic; rolls back automatically on failure)
+        run: |
+          values=(-f "$CHART/${{ inputs.values_file }}")
+          if [ "${{ vars.TARS_PLATFORM }}" = "openshift" ]; then values+=(-f "$CHART/values-openshift.yaml"); fi
+          values+=(-f "$RUNNER_TEMP/images.yaml")
+          helm upgrade --install tars "$CHART" \
+            --namespace "${{ vars.K8S_NAMESPACE }}" \
+            "${values[@]}" \
+            --set config.publicOrigin="https://${{ vars.TARS_HOST }}" \
+            --set ingress.host="${{ vars.TARS_HOST }}" \
+            --set ingress.className="${{ vars.TARS_INGRESS_CLASS }}" \
+            --set ingress.tlsSecretName="${{ vars.TARS_INGRESS_TLS_SECRET }}" \
+            --set config.region="${{ vars.IBM_REGION }}" \
+            --set config.s3EndpointUrl="${{ vars.TARS_S3_ENDPOINT }}" \
+            --set config.datasetBucket="${{ vars.TARS_DATASET_BUCKET }}" \
+            --set config.resultBucket="${{ vars.TARS_RESULT_BUCKET }}" \
+            --set config.trustedProxyHops="${{ vars.TARS_TRUSTED_PROXY_HOPS || '1' }}" \
+            --atomic --wait --timeout 30m --history-max 10
+      - name: Smoke test through the public origin
+        run: |
+          base="https://${{ vars.TARS_HOST }}"
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null "$base/" && curl -fsS -o /dev/null "$base/api/v1/ephemeris/epoch-range" && break
+            sleep 10
+          done
+          curl -fsS -o /dev/null "$base/" || { echo "frontend not reachable"; exit 1; }
+          curl -fsS "$base/api/v1/ephemeris/epoch-range" | grep -q dataset_id || { echo "no active dataset"; exit 1; }
+          headers=$(curl -fsS -D - -o /dev/null "$base/api/v1/jobs")
+          echo "$headers" | grep -qi '^set-cookie: tars_uid=.*Secure' || { echo "identity cookie missing or not Secure"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$base/internal/v1/active")
+          [ "$code" = "404" ] || { echo "internal API reachable from the internet ($code)"; exit 1; }
+          echo "smoke checks passed"

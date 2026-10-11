@@ -7,7 +7,7 @@ Runs long calculations reliably: route search (`plan`), launch-window grids (`po
 | API | `jobs` (port `8003`) | `uvicorn jobs_service.app:create_app` | Admission, status, results, history |
 | Outbox publisher | `outbox` | `python -m jobs_service.outbox` | Moves committed jobs onto the Redis queue; re-sends lost or abandoned work |
 | Worker | `worker` | `arq jobs_service.worker.WorkerSettings` | Runs one CPU calculation at a time in a child process |
-| Bootstrap | `initialize` | `scripts/initialize_services.py` | Applies `schema.sql`; runs once |
+| Bootstrap | `initialize` | `python -m jobs_service.bootstrap` | Applies `schema.sql`, and creates the buckets when `CREATE_BUCKETS=1`. Runs once per deploy. |
 
 **Images:** `services/Dockerfile`. Target `jobs` (`tars/jobs:local`) serves the API, outbox and bootstrap. Target `worker` (`tars/worker:local`) adds Numba.
 
@@ -48,7 +48,7 @@ Runs long calculations reliably: route search (`plan`), launch-window grids (`po
 | Global queue cap (`GLOBAL_QUEUE_CAP`) | 25 queued | `503` |
 | Limiter Redis unavailable | Fails closed | `503` |
 
-Client IP comes from `TRUSTED_PROXY_HOPS`. `0` uses the socket address. `N` takes the Nth entry from the right of `X-Forwarded-For`; anything further left is client-supplied and ignored. Expected values: local 0, one reverse proxy 1, CloudFront + ALB 2.
+Client IP comes from `TRUSTED_PROXY_HOPS`. `0` uses the socket address. `N` takes the Nth entry from the right of `X-Forwarded-For`; anything further left is client-supplied and ignored. Expected values: local 0, behind the cluster ingress 1, behind IBM CIS (or another CDN/WAF) plus the ingress 2.
 
 ## Configuration
 

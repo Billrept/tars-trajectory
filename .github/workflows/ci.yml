@@ -1,13 +1,13 @@
 # CI/CD for TARS.
 #
-#   pull request ─┬─ secret scan ─┐
-#                 ├─ python tests ─┼─► build all images (no push)
-#                 └─ frontend ─────┘
-#   push to main / tag v* ── same checks ─► build + push images to GHCR
-#                                            (tags: sha-<commit>, main, <version>)
-#
-# Deployment to AWS is not wired yet: it needs the Terraform/ECS work (plan Task 9),
-# where a reviewed `terraform plan` consumes the image digests published here.
+#   pull request ─┬─ secret scan ───┐
+#                 ├─ python tests ───┼─► build all images (no push)
+#                 ├─ frontend ───────┤
+#                 └─ deploy config ──┘   (terraform validate, helm lint/render, kubeconform)
+#   push to main ── same ─► push images to GHCR ─► deploy staging   (if DEPLOY_ENABLED)
+#   tag v*       ── same ─► push images to GHCR ─► deploy staging ─► deploy production
+#                                                                   (approval required)
+# Deploys run .github/workflows/deploy.yml against IBM Cloud (IKS or OpenShift).
 name: CI/CD
 
 on:
@@ -77,9 +77,43 @@ jobs:
       - run: bun run build
       - run: bun test
 
+  deploy-config:
+    name: Deployment config (Terraform, Helm)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+      - name: Terraform fmt and validate (no backend, no credentials)
+        run: |
+          terraform fmt -check -recursive infra/terraform
+          for root in infra/terraform/ibm/platform infra/terraform/ibm/cluster; do
+            terraform -chdir="$root" init -backend=false -input=false
+            terraform -chdir="$root" validate
+          done
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
+      - name: Helm lint and render every values combination
+        run: |
+          chart=deploy/helm/tars; mkdir -p rendered
+          helm lint "$chart" -f "$chart/values-production.yaml"
+          helm template tars "$chart" > rendered/default.yaml
+          helm template tars "$chart" -f "$chart/values-staging.yaml" > rendered/staging.yaml
+          helm template tars "$chart" -f "$chart/values-production.yaml" > rendered/production.yaml
+          helm template tars "$chart" -f "$chart/values-production.yaml" -f "$chart/values-openshift.yaml" > rendered/openshift.yaml
+      - name: Validate rendered manifests (kubeconform, strict)
+        run: >
+          docker run --rm -v "$PWD/rendered:/r"
+          ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
+          -strict -summary -kubernetes-version 1.30.0 /r/default.yaml /r/staging.yaml /r/production.yaml /r/openshift.yaml
+
   images:
     name: Image ${{ matrix.image }}
-    needs: [secrets, python, frontend]
+    needs: [secrets, python, frontend, deploy-config]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -127,9 +161,33 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
           sbom: ${{ env.PUBLISH == 'true' }}
-          # Only the frontend uses these; they are inlined into its bundle at build time.
-          # Set repository variables to point a published frontend at real API URLs.
+          # Only the frontend uses these. same-origin = relative /api/v1 calls, so one image
+          # works behind any ingress host (build once, deploy to every environment).
           build-args: |
-            PUBLIC_API_URL=${{ vars.PUBLIC_API_URL || 'http://localhost:8002' }}
-            PUBLIC_EPHEMERIS_URL=${{ vars.PUBLIC_EPHEMERIS_URL || 'http://localhost:8001' }}
-            PUBLIC_JOBS_URL=${{ vars.PUBLIC_JOBS_URL || 'http://localhost:8003' }}
+            PUBLIC_API_URL=same-origin
+
+  deploy-staging:
+    name: Deploy staging
+    needs: [images]
+    if: github.event_name == 'push' && vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      values_file: values-staging.yaml
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: read
+
+  deploy-production:
+    name: Deploy production
+    needs: [deploy-staging]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production # protect this environment with required reviewers
+      values_file: values-production.yaml
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: read

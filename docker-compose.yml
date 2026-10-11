@@ -67,8 +67,7 @@ services:
     pull_policy: never
     environment: *environment
     user: "10001"
-    command: ["python", "/bootstrap/initialize_services.py"]
-    volumes: ["./scripts/initialize_services.py:/bootstrap/initialize_services.py:ro"]
+    command: ["python", "-m", "jobs_service.bootstrap"]
     depends_on:
       postgres: {condition: service_healthy}
       objects: {condition: service_healthy}

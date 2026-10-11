@@ -1,0 +1,6 @@
+# Staging: one replica of each service, no autoscaling. Override host and endpoints per account.
+config:
+  appEnv: staging
+  publicOrigin: https://tars-staging.example.com
+ingress:
+  host: tars-staging.example.com

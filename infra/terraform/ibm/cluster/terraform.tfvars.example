@@ -1,0 +1,8 @@
+region    = "jp-tok"
+namespace = "tars"
+platform_state = {
+  bucket   = "tars-tfstate"
+  key      = "prod/platform.tfstate"
+  region   = "jp-tok"
+  endpoint = "https://s3.jp-tok.cloud-object-storage.appdomain.cloud"
+}

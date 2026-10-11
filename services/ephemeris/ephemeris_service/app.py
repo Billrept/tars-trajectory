@@ -9,11 +9,12 @@ from tars_core.bodies import BODY_BY_ID
 from tars_core.time import iso_to_jd,jd_to_iso,jds_to_iso
 from tars_core.mechanics.transforms import positions_to_scene
 from tars_contracts.ttl import TTLValue
+from tars_contracts.tls import redis_tls_kwargs
 from .store import DatasetStore
 
 def create_store():
     client=boto3.client('s3',endpoint_url=os.environ.get('S3_ENDPOINT_URL'),region_name=os.environ.get('AWS_REGION','us-east-1'))
-    return DatasetStore(client,os.environ['DATASET_BUCKET'],redis.Redis.from_url(os.environ['CACHE_REDIS_URL'],socket_timeout=.2,socket_connect_timeout=.2),os.environ.get('CACHE_PREFIX','tars:local'))
+    return DatasetStore(client,os.environ['DATASET_BUCKET'],redis.Redis.from_url(os.environ['CACHE_REDIS_URL'],socket_timeout=.2,socket_connect_timeout=.2,**redis_tls_kwargs(os.environ['CACHE_REDIS_URL'],'CACHE_REDIS_CA_CERT')),os.environ.get('CACHE_PREFIX','tars:local'))
 
 # Public reads only change when a new dataset is published; a CDN may reuse them briefly.
 PUBLIC_CACHE='public, max-age=60'

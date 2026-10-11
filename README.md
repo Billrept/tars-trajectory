@@ -17,7 +17,7 @@ Python microservices for the orbital mechanics and job pipeline, and a Three.js 
 | Identity | No accounts: anonymous HttpOnly cookie per browser, plus per-IP and global admission limits |
 | Local runtime | Docker Compose: non-root, read-only containers with dropped capabilities |
 | Tests | pytest against real Postgres, Redis and S3 test containers; `bun test`; Playwright for browser checks |
-| Planned (not built yet) | AWS ECS Fargate, Terraform, CloudFront + ALB + WAF, RDS, ElastiCache, S3 |
+| Production platform | IBM Cloud: Red Hat OpenShift or IKS (multizone), Databases for PostgreSQL, Databases for Redis ×2, Cloud Object Storage, Key Protect; Terraform + Helm. Written and validated, not yet applied. |
 
 ## Repository layout
 
@@ -28,7 +28,9 @@ Python microservices for the orbital mechanics and job pipeline, and a Three.js 
 | [`services/trajectory/`](services/trajectory/README.md) | Synchronous trajectory calculations |
 | [`services/jobs/`](services/jobs/README.md) | Job API, outbox publisher, CPU worker, schema |
 | `services/Dockerfile` | One multi-target Dockerfile for all Python images |
-| `.github/` | CI/CD workflow and Dependabot configuration |
+| `.github/` | CI/CD workflows (`ci.yml`, reusable `deploy.yml`) and Dependabot |
+| [`deploy/`](deploy/README.md) | Helm chart for IKS and OpenShift, and the deployment runbook |
+| [`infra/terraform/ibm/`](infra/terraform/ibm/README.md) | Terraform: platform (VPC, cluster, databases, storage, keys) and cluster bootstrap (namespace, secrets) |
 | [`packages/`](packages/README.md) | `tars_core` (numerical engine) and `tars_contracts` (wire contracts, clients) |
 | [`scripts/`](scripts/README.md) | Local setup and end-to-end verification |
 | [`tests/`](tests/README.md) | Unit, contract and integration tests |
@@ -36,7 +38,7 @@ Python microservices for the orbital mechanics and job pipeline, and a Three.js 
 
 ## Quick Start — independent local services
 
-Requirements: Docker Compose and Python 3.12. No AWS resources are created.
+Requirements: Docker Compose and Python 3.12. No cloud resources are created.
 
 ```bash
 python3.12 scripts/setup_local.py
@@ -88,7 +90,7 @@ Splitting only helps if the services don't all wait on one another. Trajectory r
 
 High availability doesn't come from the split itself. It needs multiple replicas, managed PostgreSQL and Redis, and more than one availability zone. That's part of the planned cloud deployment.
 
-Planned next: ECS/Fargate on AWS with Terraform, TLS and edge rate limiting, CI rollout, and operational dashboards. None of this is built yet.
+Production target: IBM Cloud (OpenShift or IKS) with managed Postgres, Redis and Object Storage. The Terraform, Helm chart and deploy pipeline are written and validated, but nothing has been provisioned yet. See [deploy/README.md](deploy/README.md).
 
 ## Verification
 
@@ -109,30 +111,25 @@ The numerical model is heliocentric patched-conic approximation, not flight-qual
 GitHub Actions, in [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
 ```
-pull request ─┬─ Secret scan (gitleaks, full history) ─┐
-              ├─ Python tests (unit + contract + integration on real Postgres/Redis/S3) ─┼─► build all 5 images, no push
-              └─ Frontend build and tests ──────────────┘
-push to main  ── same checks ─► build and push images to GHCR
-tag v1.2.3    ── same checks ─► build and push images tagged 1.2.3
+pull request ─┬─ Secret scan (gitleaks, full history) ───────────┐
+              ├─ Python tests (unit + contract + integration) ───┤
+              ├─ Frontend build and tests ───────────────────────┼─► build all 5 images, no push
+              └─ Deployment config (Terraform validate, Helm lint/render, kubeconform) ┘
+push to main ── same checks ─► push images to GHCR ─► deploy staging
+tag v1.2.3   ── same checks ─► push images to GHCR ─► deploy staging ─► deploy production (approval)
 ```
 
 - **Images:** `ghcr.io/<owner>/<repo>/{ephemeris,trajectory,jobs,worker,frontend}`, tagged `sha-<commit>`, `main`, and the version on tags. Published images carry build provenance and an SBOM. Layer cache is kept in GitHub Actions between runs.
 - **Supply chain:** every action is pinned to a commit SHA, and the secret scanner runs as a digest-pinned container. [Dependabot](.github/dependabot.yml) proposes weekly updates for the actions and the Docker base images.
 - **Permissions:** the default token is read-only. Only the image job can write packages, and pull requests never log in to the registry.
-- **Frontend image:** API URLs are baked in at build time. Set the repository variables `PUBLIC_API_URL`, `PUBLIC_EPHEMERIS_URL` and `PUBLIC_JOBS_URL` to point a published frontend at real endpoints; otherwise it uses the localhost defaults.
+- **Frontend image:** built `same-origin`, so it calls relative `/api/v1/...` paths and one image serves every environment behind the ingress. Local Compose still bakes in the localhost ports.
+- **Deploy stages:** off until the repository variable `DEPLOY_ENABLED=true` is set. They deploy by image digest with `helm upgrade --atomic` (automatic rollback on failure), then run smoke checks. Production runs only for `v*` tags, through a protected GitHub environment. Setup: [deploy/README.md](deploy/README.md).
 
 After creating the GitHub repository:
 1. Push `main`.
 2. Under **Settings → Branches**, protect `main`: require pull requests, and require the checks *Secret scan*, *Python tests*, *Frontend build and tests* and the five *Image* jobs.
 3. Make the GHCR packages public if you want people to pull the images.
 4. Release with `git tag v0.1.0 && git push origin v0.1.0`.
-
-**Deployment, not built yet (plan Task 9):**
-1. GitHub OIDC assumes an AWS deploy role, so no long-lived keys are stored.
-2. Every pull request runs `terraform plan`, using the image digests published above.
-3. A reviewer approves through a protected GitHub `production` environment.
-4. The pipeline applies that exact saved plan and runs smoke checks.
-5. Rollback means re-applying the previous image digests.
 
 ## What's been built
 
@@ -145,6 +142,12 @@ All verified on the local Docker stack; nothing is deployed yet.
 - **Faster builds:** one multi-target Dockerfile with shared uv stages and a persistent download cache. Measured: cold build 62 s → 33 s, warm rebuild 23 s → 4 s, single-service code change 7 s → 3 s.
 - **Less coupling between services:** the active dataset manifest is cached for 60 s, and public ephemeris reads are CDN-cacheable.
 - **CI/CD:** a GitHub Actions pipeline with a secret scan, the Python and frontend test suites, and all five image builds on every pull request; images with provenance and an SBOM pushed to GHCR from `main` and version tags. Validated locally with `actionlint`, a gitleaks run, and a Linux amd64 install of the locked dependencies; it hasn't run on GitHub yet because there's no remote.
+- **IBM Cloud deployment:**
+  - Terraform for the platform and cluster bootstrap, validated against the IBM provider schema.
+  - A hardened Helm chart for IKS and OpenShift, passing strict kubeconform.
+  - Staging and production deploy stages.
+  - Redis TLS for managed instances, and the bootstrap packaged in the jobs image.
+  - The chart installed on a local `kind` cluster under the `restricted` Pod Security Standard, and the full browser flow worked through an NGINX ingress.
 
 ## License
 

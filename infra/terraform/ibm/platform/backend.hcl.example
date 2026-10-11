@@ -1,0 +1,16 @@
+# Copy to backend.hcl (gitignored) and run: terraform init -backend-config=backend.hcl
+# State bucket: create once in COS (e.g. "tars-tfstate"), with versioning on.
+# Credentials: HMAC keys of a Service ID with Writer on that bucket, via the
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables (never in this file).
+bucket = "tars-tfstate"
+key    = "prod/platform.tfstate"
+region = "jp-tok"
+endpoints = {
+  s3 = "https://s3.jp-tok.cloud-object-storage.appdomain.cloud"
+}
+skip_region_validation      = true
+skip_credentials_validation = true
+skip_requesting_account_id  = true
+skip_metadata_api_check     = true
+skip_s3_checksum            = true
+use_path_style              = true

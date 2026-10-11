@@ -1,0 +1,109 @@
+# Defaults are safe for a single small environment. values-staging.yaml and
+# values-production.yaml override replicas, autoscaling and the public host.
+
+# kubernetes: IBM Cloud Kubernetes Service (or any conformant cluster)
+# openshift:  Red Hat OpenShift on IBM Cloud — omits fixed UIDs so the restricted-v2 SCC assigns one
+platform: kubernetes
+
+image:
+  # Images are published by CI to GHCR. Prefer digests: CI passes them with --set images.<name>.digest=sha256:...
+  registry: ghcr.io/OWNER/REPO
+  tag: main
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+images:
+  ephemeris: {digest: ""}
+  trajectory: {digest: ""}
+  jobs: {digest: ""}
+  worker: {digest: ""}
+  frontend: {digest: ""}
+
+# Secrets are created outside Helm (infra/terraform/ibm/cluster) and referenced here by name.
+secrets:
+  runtime: tars-runtime   # DATABASE_URL, QUEUE_REDIS_URL, CACHE_REDIS_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, SERVICE_TOKEN
+  caCerts: tars-ca-certs  # postgres-ca.crt, queue-redis-ca.crt, cache-redis-ca.crt (managed-service private CAs)
+
+config:
+  appEnv: production
+  publicOrigin: https://tars.example.com     # the single public origin; also the CORS allow-list
+  s3EndpointUrl: https://s3.direct.jp-tok.cloud-object-storage.appdomain.cloud
+  region: jp-tok
+  datasetBucket: tars-datasets
+  resultBucket: tars-results
+  databaseSchema: tars_jobs
+  cookieSecure: "1"
+  trustedProxyHops: "1"        # 1 = cluster ingress only; 2 if a CDN/WAF proxy (e.g. IBM CIS) sits in front
+  globalQueueCap: "25"
+  rateLimitPerMin: "5"
+  rateLimitPerDay: "30"
+  activeManifestTtlSeconds: "60"
+  ephemerisStart: "2025-01-01"
+  ephemerisEnd: "2060-01-01"
+
+ingress:
+  enabled: true
+  className: ""                 # e.g. public-iks-k8s-nginx on IKS; leave empty for the OpenShift default router
+  host: tars.example.com
+  tlsSecretName: ""             # IKS: the cluster's default Ingress secret, or a cert-manager/Secrets Manager secret
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # long-lived ephemeris WebSocket
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+networkPolicy:
+  enabled: true
+  # Namespace of the ingress controller allowed to reach the public services.
+  ingressNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system   # IKS; OpenShift: network.openshift.io/policy-group: ingress
+
+topologySpread: true   # spread replicas across zones (topology.kubernetes.io/zone)
+
+services:
+  ephemeris:
+    image: ephemeris
+    port: 8000
+    replicas: 1
+    health: {path: /readyz, livePath: /livez}
+    resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: "1", memory: 512Mi}}
+    autoscaling: {enabled: false, min: 2, max: 6, cpu: 70}
+  trajectory:
+    image: trajectory
+    port: 8000
+    replicas: 1
+    health: {path: /readyz, livePath: /livez}
+    resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {cpu: "1", memory: 512Mi}}
+    autoscaling: {enabled: false, min: 2, max: 8, cpu: 70}
+  jobs:
+    image: jobs
+    port: 8000
+    replicas: 1
+    health: {path: /readyz, livePath: /livez}
+    resources: {requests: {cpu: 100m, memory: 192Mi}, limits: {cpu: 500m, memory: 384Mi}}
+    autoscaling: {enabled: false, min: 2, max: 4, cpu: 70}
+  outbox:
+    image: jobs
+    command: ["python", "-m", "jobs_service.outbox"]
+    replicas: 1
+    resources: {requests: {cpu: 50m, memory: 96Mi}, limits: {cpu: 250m, memory: 192Mi}}
+    autoscaling: {enabled: false}
+  worker:
+    image: worker
+    replicas: 1
+    terminationGracePeriodSeconds: 60   # an interrupted job is re-leased and retried with the same seed
+    resources: {requests: {cpu: "1", memory: 512Mi}, limits: {cpu: "2", memory: 1Gi}}
+    autoscaling: {enabled: false, min: 2, max: 6, cpu: 80}
+  frontend:
+    image: frontend
+    port: 3000
+    replicas: 1
+    health: {path: /healthz, livePath: /healthz}
+    resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 250m, memory: 128Mi}}
+    autoscaling: {enabled: false, min: 2, max: 4, cpu: 70}
+
+bootstrap:
+  # Applies the jobs schema before every install/upgrade (Helm pre-install/pre-upgrade hook).
+  enabled: true
+loader:
+  # Publishes the first dataset on install; the CronJob refreshes it. Publication is all-or-nothing.
+  onInstall: true
+  schedule: "0 3 1 * *"   # monthly, 03:00 UTC on the 1st
+  activeDeadlineSeconds: 3600

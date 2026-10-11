@@ -1,0 +1,56 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /* Default deny for inbound traffic; then allow only:
+       ingress controller -> frontend, ephemeris, trajectory, jobs (public routes)
+       trajectory, jobs, outbox, worker, loader -> ephemeris (internal dataset API)
+   Egress stays open: managed Postgres/Redis/COS endpoints and JPL Horizons are outside the cluster. */ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny-ingress
+  labels:
+    {{- include "tars.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-from-ingress
+  labels:
+    {{- include "tars.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name | quote }}]}
+      - {key: app.kubernetes.io/name, operator: In, values: [frontend, ephemeris, trajectory, jobs]}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 14 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-to-ephemeris
+  labels:
+    {{- include "tars.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: ephemeris
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - {key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name | quote }}]}
+              - {key: app.kubernetes.io/name, operator: In, values: [trajectory, jobs, outbox, worker]}
+      ports:
+        - {port: 8000}
+{{- end }}

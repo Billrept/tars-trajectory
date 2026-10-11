@@ -63,3 +63,12 @@ test('build rejects credentials and unsupported protocols in the public API URL'
     expect(await Bun.file(`${import.meta.dir}/dist/index.html`).exists()).toBe(true);
   }
 });
+
+test('same-origin build calls relative /api/v1 paths with no baked-in host', async () => {
+  const build = (env: Record<string, string>) => Bun.spawn(['bun', 'run', 'build'], { cwd: import.meta.dir, env: { ...process.env, ...env }, stdout: 'ignore', stderr: 'pipe' }).exited;
+  expect(await build({ PUBLIC_API_URL: 'same-origin' })).toBe(0);
+  const bundle = (await Promise.all([...new Bun.Glob('dist/*.js').scanSync(import.meta.dir)].map(f => Bun.file(`${import.meta.dir}/${f}`).text()))).join('\n');
+  expect(bundle).not.toContain('localhost');
+  expect(bundle).toContain('/api/v1/ephemeris/');
+  expect(await build({ PUBLIC_API_URL: 'HTTP://LOCALHOST:8000/' })).toBe(0); // restore the default build for later checks
+});

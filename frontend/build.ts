@@ -2,14 +2,21 @@ import { copyFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TEXTURE_MAP } from './js/planetData.js';
 
+// 'same-origin' builds one bundle for every environment: the browser calls relative
+// /api/v1/... paths on whatever host served the page (the cluster ingress).
+const SAME_ORIGIN = 'same-origin';
 const apiUrl = process.env.PUBLIC_API_URL ?? 'http://localhost:8000';
-const parsedUrl = new URL(apiUrl);
-if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
-  throw new Error('PUBLIC_API_URL must be an HTTP(S) URL without credentials, query or fragment');
+if (apiUrl !== SAME_ORIGIN) {
+  const parsedUrl = new URL(apiUrl);
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
+    throw new Error('PUBLIC_API_URL must be an HTTP(S) URL without credentials, query or fragment, or "same-origin"');
+  }
 }
 const define = {};
 for (const name of ['PUBLIC_API_URL', 'PUBLIC_EPHEMERIS_URL', 'PUBLIC_JOBS_URL']) {
-  const url = new URL(process.env[name] ?? apiUrl);
+  const value = process.env[name] ?? apiUrl;
+  if (value === SAME_ORIGIN) { define[`process.env.${name}`] = '""'; continue; }
+  const url = new URL(value);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error(`${name} must be an HTTP(S) URL without credentials, query or fragment`);
   }

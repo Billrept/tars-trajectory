@@ -5,6 +5,7 @@ from fastapi import FastAPI,HTTPException,Header,Query,Request,Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 from tars_contracts.client import EphemerisClient
+from tars_contracts.tls import redis_tls_kwargs
 from tars_contracts.requests import JobSubmission,normalize_submission
 from tars_core.time import iso_to_jd
 from .config import repository,result_store
@@ -15,7 +16,7 @@ PER_MIN=int(os.environ.get('RATE_LIMIT_PER_MIN') or 5);PER_DAY=int(os.environ.ge
 
 def create_app(repo=None,ephemeris=None,results=None,limits=None):
     repo=repo or repository();ephemeris=ephemeris or EphemerisClient(os.environ['EPHEMERIS_URL'],os.environ['SERVICE_TOKEN'])
-    results=results or result_store();limits=limits or redis.Redis.from_url(os.environ['CACHE_REDIS_URL'],socket_timeout=.2,socket_connect_timeout=.2)
+    results=results or result_store();limits=limits or redis.Redis.from_url(os.environ['CACHE_REDIS_URL'],socket_timeout=.2,socket_connect_timeout=.2,**redis_tls_kwargs(os.environ['CACHE_REDIS_URL'],'CACHE_REDIS_CA_CERT'))
     origins=os.environ.get('CORS_ORIGINS','http://localhost:3000').split(',')
     @asynccontextmanager
     async def lifespan(app):

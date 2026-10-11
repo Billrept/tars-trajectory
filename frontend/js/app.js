@@ -15,7 +15,7 @@ import { rankBodies } from './utils/search.js';
 import { shouldRender, clampPixelRatio, flyProgress, TrailBuffer, gridFadeFactor } from './utils/perf.js';
 
 
-const WS = EPHEMERIS_API.replace(/^http/, 'ws');
+const WS = (EPHEMERIS_API || location.origin).replace(/^http/, 'ws'); // '' = same-origin build
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 // ── Cividis colormap (reversed: low=yellow/bright, high=navy/dark) ────────
@@ -378,7 +378,7 @@ function applyGridRadialFade(grid, inner = 1800, outer = 4000) {
 // ── API ────────────────────────────────────────────────────────────────────
 async function fetchEpochRange() {
   try {
-    const res = await fetch(`${EPHEMERIS_API}/epoch-range`);
+    const res = await fetch(`${EPHEMERIS_API}/api/v1/ephemeris/epoch-range`);
     if (res.ok) {
       const data = await res.json();
       epochRange.start = data.start_iso;
@@ -389,7 +389,7 @@ async function fetchEpochRange() {
 
 async function fetchBodies() {
   try {
-    const res = await fetch(`${EPHEMERIS_API}/bodies`);
+    const res = await fetch(`${EPHEMERIS_API}/api/v1/ephemeris/bodies`);
     bodies = await res.json();
     setStatus('ok', `${bodies.length} bodies loaded`);
   } catch (e) {
@@ -454,7 +454,7 @@ async function fetchOrbits() {
       const step = daysToFetch < 200 ? 1 : 5; 
 
       const res = await fetch(
-        `${EPHEMERIS_API}/bodies/${body.name.toLowerCase()}/ephemeris?start=${encodeURIComponent(epochRange.start)}&end=${encodeURIComponent(endIso)}&step_days=${step}&scene_units=true`
+        `${EPHEMERIS_API}/api/v1/ephemeris/bodies/${body.name.toLowerCase()}/ephemeris?start=${encodeURIComponent(epochRange.start)}&end=${encodeURIComponent(endIso)}&step_days=${step}&scene_units=true`
       );
       const data = await res.json();
 
@@ -747,7 +747,7 @@ function connectEphemeris() {
     try { ephemerisWs.close(); } catch (_) {}
   }
 
-  ephemerisWs = new WebSocket(`${WS}/ws/ephemeris/stream`);
+  ephemerisWs = new WebSocket(`${WS}/api/v1/ephemeris/ws/stream`);
 
   // While the tab is hidden, keep only the latest payload; applying a burst of
   // stale snapshots on return would snap bodies through time. No protocol change.
@@ -1902,7 +1902,7 @@ async function showOrbitInsights(msg, initialElements = null) {
   if (optimizedEl) {
     try {
       // Fetch details for initial
-      const resInit = await fetch(`${API}/orbit-info`, {
+      const resInit = await fetch(`${API}/api/v1/trajectory/orbit-info`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1916,7 +1916,7 @@ async function showOrbitInsights(msg, initialElements = null) {
       const initialInfo = await resInit.json();
 
       // Fetch details for optimized
-      const resOpt = await fetch(`${API}/orbit-info`, {
+      const resOpt = await fetch(`${API}/api/v1/trajectory/orbit-info`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

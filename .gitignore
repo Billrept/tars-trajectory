@@ -62,3 +62,12 @@ docs/architecture/*
 
 # AI assistant guidance (Claude Code): local only
 CLAUDE.md
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+backend.hcl
+*.tfvars
+!*.tfvars.example
