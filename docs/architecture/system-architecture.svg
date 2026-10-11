@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1120 648" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="system-architecture-title system-architecture-desc" id="system-architecture-root">
+<title id="system-architecture-title">TARS system architecture</title>
+<desc id="system-architecture-desc">The frontend calls the ephemeris, trajectory and jobs services; jobs commit admission and outbox rows to PostgreSQL, the outbox feeds a Redis queue, a CPU worker writes fenced results to PostgreSQL and object storage, and a loader publishes JPL Horizons datasets to object storage.</desc>
+<defs>
+      <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif:ital@0;1&amp;family=Noto+Sans+KR:wght@400;500;600&amp;family=Noto+Serif+KR:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;display=swap');
+      #system-architecture-root { font-family: 'Geist', system-ui, sans-serif; color: #2d3142; }
+      #system-architecture-root .scroll { overflow-x: auto; }</style>
+<pattern id="system-architecture-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.9" fill="#2d3142" fill-opacity="0.10"/></pattern>
+<marker id="system-architecture-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="system-architecture-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="system-architecture-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+</defs>
+<rect width="100%" height="100%" fill="#f5f5f5"/>
+<rect width="100%" height="100%" fill="url(#system-architecture-dots)" opacity="0.55"/>
+<rect x="304" y="88" width="200" height="412" rx="8" fill="#2d3142" fill-opacity="0.02" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+<rect x="374.0" y="92" width="60" height="12" rx="2" fill="#f5f5f5"/>
+<text x="404.0" y="101" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">SERVICES</text>
+<rect x="624" y="48" width="200" height="512" rx="8" fill="#2d3142" fill-opacity="0.02" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+<rect x="706.0" y="52" width="36" height="12" rx="2" fill="#f5f5f5"/>
+<text x="724.0" y="61" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">DATA</text>
+<rect x="884" y="28" width="200" height="472" rx="8" fill="#2d3142" fill-opacity="0.02" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+<rect x="948.0" y="32" width="72" height="12" rx="2" fill="#f5f5f5"/>
+<text x="984.0" y="41" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">BACKGROUND</text>
+<path d="M 208,256 H 252 Q 260,256 260,248 V 160 Q 260,152 268,152 H 320" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#system-architecture-arrow-link)"/>
+<path d="M 208,272 H 320" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#system-architecture-arrow-link)"/>
+<path d="M 208,288 H 252 Q 260,288 260,296 V 444 Q 260,452 268,452 H 320" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#system-architecture-arrow-link)"/>
+<path d="M 404,260 V 184" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<path d="M 488,132 H 640" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<path d="M 488,172 H 716 Q 724,172 724,180 V 200" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<path d="M 488,436 H 572 Q 580,436 580,428 V 408 Q 580,400 588,400 H 640" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<path d="M 488,468 H 600 Q 608,468 608,476 V 504 Q 608,512 616,512 H 640" fill="none" stroke="#bf4520" stroke-width="1.4" marker-end="url(#system-architecture-arrow-accent)"/>
+<path d="M 900,108 H 860 Q 852,108 852,116 V 208 Q 852,216 844,216 H 808" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<path d="M 984,420 V 256 Q 984,248 976,248 H 808" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<path d="M 808,392 H 868 Q 876,392 876,400 V 432 Q 876,440 884,440 H 900" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<path d="M 900,468 H 892 Q 884,468 884,476 V 504 Q 884,512 876,512 H 808" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<rect x="192.7" y="194" width="58.6" height="12" rx="2" fill="#f5f5f5"/>
+<text x="222" y="203" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">WS STREAM</text>
+<rect x="268.1" y="254" width="47.8" height="12" rx="2" fill="#f5f5f5"/>
+<text x="292" y="263" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LAMBERT</text>
+<rect x="177.6" y="364" width="74.8" height="12" rx="2" fill="#f5f5f5"/>
+<text x="215" y="373" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ANON COOKIE</text>
+<rect x="409.0" y="216" width="64.0" height="12" rx="2" fill="#f5f5f5"/>
+<text x="441" y="225" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">READ STATE</text>
+<rect x="542.8" y="114" width="42.4" height="12" rx="2" fill="#f5f5f5"/>
+<text x="564" y="123" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CHUNKS</text>
+<rect x="537.4" y="178" width="53.2" height="12" rx="2" fill="#f5f5f5"/>
+<text x="564" y="187" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DATASETS</text>
+<rect x="508.8" y="442" width="42.4" height="12" rx="2" fill="#f5f5f5"/>
+<text x="530" y="451" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OUTBOX</text>
+<rect x="500.7" y="474" width="58.6" height="12" rx="2" fill="#f5f5f5"/>
+<text x="530" y="483" fill="#bf4520" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ADMIT TXN</text>
+<rect x="866.1" y="156" width="47.8" height="12" rx="2" fill="#f5f5f5"/>
+<text x="890" y="165" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">PUBLISH</text>
+<rect x="998.1" y="330" width="47.8" height="12" rx="2" fill="#f5f5f5"/>
+<text x="1022" y="339" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RESULTS</text>
+<rect x="814.1" y="374" width="47.8" height="12" rx="2" fill="#f5f5f5"/>
+<text x="838" y="383" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DEQUEUE</text>
+<rect x="820.8" y="518" width="42.4" height="12" rx="2" fill="#f5f5f5"/>
+<text x="842" y="527" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">FENCED</text>
+<rect x="40" y="240" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="40" y="240" width="168" height="64" rx="6" fill="#4f5d75" fill-opacity="0.10" stroke="#5a6580" stroke-width="1"/>
+<rect x="48" y="248" width="22" height="12" rx="2" fill="none" stroke="#5a6580" stroke-opacity="0.40" stroke-width="0.8"/>
+<text x="59.0" y="257" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">UI</text>
+<text x="124.0" y="278" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Frontend</text>
+<text x="124.0" y="294" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Three.js · Bun + Elysia</text>
+<rect x="320" y="120" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="320" y="120" width="168" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="328" y="128" width="27" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+<text x="341.5" y="137" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+<text x="404.0" y="158" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Ephemeris service</text>
+<text x="404.0" y="174" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">:8001 · immutable data</text>
+<rect x="320" y="260" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="320" y="260" width="168" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="328" y="268" width="27" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+<text x="341.5" y="277" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+<text x="404.0" y="298" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Trajectory service</text>
+<text x="404.0" y="314" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">:8002 · Lambert, legs</text>
+<rect x="320" y="420" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="320" y="420" width="168" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="328" y="428" width="27" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+<text x="341.5" y="437" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+<text x="404.0" y="458" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Jobs API + outbox</text>
+<text x="404.0" y="474" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">:8003 · admit, status</text>
+<rect x="640" y="80" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="640" y="80" width="168" height="64" rx="6" fill="#2d3142" fill-opacity="0.05" stroke="#4f5d75" stroke-width="1"/>
+<rect x="648" y="88" width="37" height="12" rx="2" fill="none" stroke="#4f5d75" stroke-opacity="0.50" stroke-width="0.8"/>
+<text x="666.5" y="97" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">REDIS</text>
+<text x="724.0" y="118" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Ephemeris cache</text>
+<text x="724.0" y="134" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">disposable · LFU</text>
+<rect x="640" y="200" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="640" y="200" width="168" height="64" rx="6" fill="#2d3142" fill-opacity="0.05" stroke="#4f5d75" stroke-width="1"/>
+<rect x="648" y="208" width="22" height="12" rx="2" fill="none" stroke="#4f5d75" stroke-opacity="0.50" stroke-width="0.8"/>
+<text x="659.0" y="217" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">S3</text>
+<text x="724.0" y="238" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Object storage</text>
+<text x="724.0" y="254" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">datasets + results</text>
+<rect x="640" y="360" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="640" y="360" width="168" height="64" rx="6" fill="#2d3142" fill-opacity="0.05" stroke="#4f5d75" stroke-width="1"/>
+<rect x="648" y="368" width="37" height="12" rx="2" fill="none" stroke="#4f5d75" stroke-opacity="0.50" stroke-width="0.8"/>
+<text x="666.5" y="377" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">REDIS</text>
+<text x="724.0" y="398" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Job queue</text>
+<text x="724.0" y="414" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ARQ · noeviction</text>
+<rect x="640" y="480" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="640" y="480" width="168" height="64" rx="6" fill="#bf4520" fill-opacity="0.08" stroke="#bf4520" stroke-width="1"/>
+<rect x="648" y="488" width="27" height="12" rx="2" fill="none" stroke="#bf4520" stroke-opacity="0.50" stroke-width="0.8"/>
+<text x="661.5" y="497" fill="#bf4520" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SQL</text>
+<text x="724.0" y="518" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">PostgreSQL</text>
+<text x="724.0" y="534" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">jobs · keys · outbox</text>
+<rect x="900" y="60" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="900" y="60" width="168" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="908" y="68" width="32" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+<text x="924.0" y="77" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TASK</text>
+<text x="984.0" y="98" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Ephemeris loader</text>
+<text x="984.0" y="114" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">pulls JPL Horizons</text>
+<rect x="900" y="420" width="168" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="900" y="420" width="168" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="908" y="428" width="27" height="12" rx="2" fill="none" stroke="#2d3142" stroke-opacity="0.40" stroke-width="0.8"/>
+<text x="921.5" y="437" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CPU</text>
+<text x="984.0" y="458" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Worker</text>
+<text x="984.0" y="474" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">pinned data snapshot</text>
+<line x1="40" y1="592" x2="1080" y2="592" stroke="#2d3142" stroke-opacity="0.10" stroke-width="0.8"/>
+<text x="40" y="608" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+<rect x="40" y="624" width="14" height="10" rx="2" fill="#bf4520" fill-opacity="0.08" stroke="#bf4520" stroke-width="1"/>
+<text x="60" y="632" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Source of truth</text>
+<rect x="155" y="624" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="175" y="632" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Service / process</text>
+<rect x="280" y="624" width="14" height="10" rx="2" fill="#2d3142" fill-opacity="0.05" stroke="#4f5d75" stroke-width="1"/>
+<text x="300" y="632" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Store</text>
+<rect x="345" y="624" width="14" height="10" rx="2" fill="#4f5d75" fill-opacity="0.10" stroke="#5a6580" stroke-width="1"/>
+<text x="365" y="632" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">User-facing</text>
+<line x1="440" y1="629" x2="468" y2="629" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#system-architecture-arrow-link)"/>
+<text x="476" y="632" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">HTTP / WebSocket</text>
+<line x1="576" y1="629" x2="604" y2="629" stroke="#bf4520" stroke-width="1.2" marker-end="url(#system-architecture-arrow-accent)"/>
+<text x="612" y="632" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Admission + outbox</text>
+<line x1="722" y1="629" x2="750" y2="629" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#system-architecture-arrow)"/>
+<text x="758" y="632" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Internal call</text>
+</svg>

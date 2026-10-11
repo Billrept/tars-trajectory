@@ -1,0 +1,17 @@
+.venv
+.git
+.env*
+.local
+artifacts
+frontend/node_modules
+frontend/dist
+**/__pycache__
+**/.DS_Store
+src/server.log
+frontend
+docs
+tests
+data
+.playwright-mcp
+.understand-anything
+.pytest_cache

@@ -1,0 +1,39 @@
+services:
+  objects:
+    image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command: ["mini", "-dir=/data"]
+    environment:
+      AWS_ACCESS_KEY_ID: tars_test
+      AWS_SECRET_ACCESS_KEY: test-only-password
+    ports: ["127.0.0.1:9009:8333"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9333/cluster/status >/dev/null"]
+      interval: 2s
+      retries: 30
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tars_test
+      POSTGRES_PASSWORD: test-only-password
+      POSTGRES_DB: tars_test
+    ports: ["127.0.0.1:54329:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tars_test -d tars_test"]
+      interval: 2s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:63791:6379"]
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+  cache:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:63792:6379"]
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lfu"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30

@@ -1,0 +1,2547 @@
+// ═══════════════════════════════════════════════════════════════════════════
+//  TARS Frontend — Interplanetary Trajectory Designer
+//  Three.js 3D scene + API client + UI
+// ═══════════════════════════════════════════════════════════════════════════
+
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { jdToIso, pointToUnixMs, findClosestIndexByTime } from './utils/dateUtils.js';
+import { Timer } from 'three/addons/misc/Timer.js'; 
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { PLANET_INFO, DISPLAY_RADIUS, TEXTURE_MAP, ROTATION_PERIODS } from './planetData.js';
+import { API, EPHEMERIS_API, calculateJob, waitForJob, getJobResult, listJobs, resetSession } from './apiClient.js';
+import { escapeHtml } from './utils/escape.js';
+import { rankBodies } from './utils/search.js';
+import { shouldRender, clampPixelRatio, flyProgress, TrailBuffer, gridFadeFactor } from './utils/perf.js';
+
+
+const WS = EPHEMERIS_API.replace(/^http/, 'ws');
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+// ── Cividis colormap (reversed: low=yellow/bright, high=navy/dark) ────────
+// Perceptually uniform and colour-vision-deficiency safe; approximate matplotlib samples.
+const CIVIDIS = [
+  [0.996, 0.910, 0.220], [0.882, 0.800, 0.333], [0.765, 0.702, 0.412],
+  [0.647, 0.612, 0.455], [0.541, 0.525, 0.471], [0.439, 0.443, 0.451],
+  [0.341, 0.365, 0.427], [0.231, 0.286, 0.424], [0.071, 0.208, 0.439],
+  [0.000, 0.165, 0.380], [0.000, 0.133, 0.306],
+];
+
+// ── Mass modeling defaults ────────────────────────────────────────────────
+const MASS_M0 = 2000;           // wet mass, kg
+const MASS_ISP = 320;            // bipropellant Isp, seconds
+const G0_KMS = 9.80665e-3;     // gravitational accel, km/s²
+
+function massEstimate(dvKms, m0 = MASS_M0, isp = MASS_ISP) {
+  const ve = isp * G0_KMS;
+  const mf = m0 * Math.exp(-dvKms / ve);
+  return { final: mf, propellant: m0 - mf, ratio: m0 / mf };
+}
+
+// ── State ──────────────────────────────────────────────────────────────────
+let bodies = [];                    // from /bodies
+let bodyMeshes = {};                // naif_id -> THREE.Mesh
+let transferLine = null;            // current Lambert arc
+let multiLegLines = [];             // multi-leg arc lines
+let scene, camera, renderer, labelRenderer, controls;
+let ephemerisWs = null;             // WebSocket for streaming
+let simPaused = false;
+let simSpeed = 10;
+let epochRange = { start: '2025-01-01', end: '2059-12-31' }; // updated from backend
+let stepDays = 3;
+let currentDate = new Date(epochRange.start);
+let orbitPoints = {};
+let planetTrails = {};      // naif_id -> THREE.Points (preallocated)
+let planetTrailHist = {};   // naif_id -> TrailBuffer
+const TRAIL_MAX_POINTS = 100; // how long the trail is (increase for longer)
+let lastTrailSimTime = {};
+const TRAIL_SIM_INTERVAL_MS = 6 * 60 * 60 * 1000; 
+let raycaster = new THREE.Raycaster();
+let mouse = new THREE.Vector2();
+let focusedBodyId = null; 
+let previousBodyPosition = new THREE.Vector3(); // To track delta movement
+let hoveredBodyId = null;
+const timer = new Timer();
+let isSimulationMaster = false; // TRUE = Frontend drives time (Mission), FALSE = Backend drives time (Stream)
+let lastWsRequestTime = 0; // Throttling helper
+let orbitLines = {}; // Store the visual lines so we can toggle them if needed
+let isFlyingToTarget = false; // Controls the transition animation
+let flyStartMs = 0;          // performance.now() when the current fly started
+let flyFromCameraPos = new THREE.Vector3();   // fly start pose
+let flyFromTarget = new THREE.Vector3();
+const maxParticles = 100;
+const particleGeometry = new THREE.SphereGeometry(0.6, 6, 6); // visual scale 
+const particleMaterial = new THREE.MeshBasicMaterial({ 
+    color: 0x8cb8e8, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending 
+});
+let particlePool = []; 
+let activeParticles = []; // { mesh, life }
+// Mouse Interaction State
+let mouseDownTime = 0;
+let mouseDownPos = new THREE.Vector2();
+// Hover raycast state: pointer coords are stored here; the raycast itself
+// runs at most once per frame in animate(), only when the pointer moved.
+let pointerMoved = false;
+let pointerOverCanvas = false;
+let pointerClient = { x: 0, y: 0 };
+
+// ── Render on demand ────────────────────────────────────────────────────────
+// animate() stays cheap; renderer.render only runs when something changed.
+// 1 s safety render covers any scene mutation that forgets to call this.
+let needsRender = true;
+let lastSafetyRenderMs = 0;
+function requestRender() { needsRender = true; }
+
+
+// ── Mission State ──────────────────────────────────────────────────────────
+let activeMission = null; // Object { mesh, pathPoints, startTime, durationMs }
+let spacecraftMesh = null;
+
+// ── Textures ──────────────────────────────────────────────────────────────
+const textureLoader = new THREE.TextureLoader();
+// Async texture uploads need one render when they land.
+{
+  const rawLoad = textureLoader.load.bind(textureLoader);
+  textureLoader.load = (url, onLoad, onProgress, onError) =>
+    rawLoad(url, (tex) => { requestRender(); if (onLoad) onLoad(tex); }, onProgress, onError);
+}
+
+async function init() {
+  // 1. Get Loading UI Elements
+  const loadingScreen = document.getElementById('loading-screen');
+  const loadingText = document.getElementById('loading-text');
+
+  // 2. Initialize 3D Engine
+  if (loadingText) loadingText.textContent = "Building the solar system…";
+  initScene();
+
+  // Set Camera for "Overview" shot (High up looking down)
+  camera.position.set(0, 8000, 15000); 
+  controls.target.set(0, 0, 0);        
+  controls.update();
+
+  // 3. Fetch Data (Async)
+  if (loadingText) loadingText.textContent = "Downloading Planetary Data...";
+  await Promise.all([fetchBodies(), fetchEpochRange()]);
+
+  // 4. Setup Logic
+  if (loadingText) loadingText.textContent = "Calculating Orbital Paths...";
+  populateSelects();
+  fetchOrbits();
+  connectEphemeris();
+  bindEvents();
+  initSearchBar();
+  // Mints the anonymous session cookie before any submission, then renders
+  // the visitor's mission history.
+  refreshMissionHistory();
+
+  // 5. Start Animation Loop (rendering behind the loading screen)
+  animate();
+
+  // 6. Transition: Hide Loader, keep the calm inner-system overview.
+  // No automatic zoom: the camera stays where initScene placed it until
+  // the user searches for or clicks a body.
+  setTimeout(() => {
+     if (loadingScreen) {
+         loadingScreen.classList.add('hidden'); // Triggers CSS opacity transition
+
+         // Optional: Remove completely from DOM after animation (1s)
+         setTimeout(() => {
+             loadingScreen.style.display = 'none';
+         }, 1000);
+     }
+  }, 1500);
+}
+
+
+// ── Three.js Scene Setup ───────────────────────────────────────────────────
+function initScene() {
+  const container = document.getElementById('viewport');
+  scene = new THREE.Scene();
+
+  // Camera — looking down the ecliptic
+  camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500000);
+  camera.position.set(0, 1800, 2200);
+  camera.lookAt(0, 0, 0);
+
+  // Renderer — dpr ≥ 2 screens are dense enough that MSAA there is wasted fill;
+  // below that, keep antialiasing so orbit lines stay smooth.
+  renderer = new THREE.WebGLRenderer({ antialias: window.devicePixelRatio < 2 });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(clampPixelRatio(window.devicePixelRatio));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  container.appendChild(renderer.domElement);
+
+  // CSS2D labels renderer
+  labelRenderer = new CSS2DRenderer();
+  labelRenderer.setSize(window.innerWidth, window.innerHeight);
+  labelRenderer.domElement.style.position = 'absolute';
+  labelRenderer.domElement.style.top = '0';
+  labelRenderer.domElement.style.left = '0';
+  labelRenderer.domElement.style.pointerEvents = 'none';
+  container.appendChild(labelRenderer.domElement);
+
+  // Controls
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 50;
+  controls.maxDistance = 30000;
+  controls.addEventListener('change', requestRender);
+
+  // Ambient light
+  scene.add(new THREE.AmbientLight(0x334466, 0.5));
+
+  // Sun point light
+  // No Lensflare here on purpose: three's Lensflare decides visibility by
+  // sampling a 16×16 framebuffer block at the light's screen position every
+  // render, so grid/orbit pixels crossing that block pop the flare on and off.
+  // The Sun mesh + its additive glow sprite stay steady.
+  const sunLight = new THREE.PointLight(0xfff8e7, 5.0, 0, 0);
+  sunLight.position.set(0, 0, 0);
+  scene.add(sunLight);
+
+  // Starfield background
+  // createStarfield();
+  createUniverseBackground();
+
+  // Grid helper (ecliptic plane reference, barely-there)
+  // depthWrite=false so transparent things (Sun glow, orbit lines) blend over
+  // it instead of z-fighting through it; renderOrder -1 keeps it behind them.
+  const grid = new THREE.GridHelper(8000, 40, 0x1c2a3f, 0x101a28);
+  grid.material.transparent = true;
+  grid.material.opacity = 0.07;
+  grid.material.depthWrite = false;
+  grid.renderOrder = -1;
+  applyGridRadialFade(grid);
+  scene.add(grid);
+
+  // Resize
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setPixelRatio(clampPixelRatio(window.devicePixelRatio));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    labelRenderer.setSize(window.innerWidth, window.innerHeight);
+    requestRender();
+  });
+}
+
+// Search island: ARIA combobox + listbox (the native <datalist> can't be styled).
+function initSearchBar() {
+  const input = document.getElementById('search-input');
+  const list = document.getElementById('search-results');
+  const byId = new Map(bodies.map(b => [b.naif_id, b]));
+  let matches = [];
+  let active = -1;
+
+  const bodyType = body => body.parent_id
+    ? `Moon of ${byId.get(body.parent_id)?.name ?? 'its planet'}`
+    : (PLANET_INFO[body.naif_id]?.type ?? 'Body');
+
+  function setActive(index) {
+    active = index;
+    [...list.children].forEach((li, i) => li.setAttribute('aria-selected', String(i === active)));
+    const li = list.children[active];
+    if (li && li.id) { input.setAttribute('aria-activedescendant', li.id); li.scrollIntoView({ block: 'nearest' }); }
+    else input.removeAttribute('aria-activedescendant');
+  }
+  function open() {
+    matches = rankBodies(bodies, input.value);
+    list.replaceChildren();
+    if (matches.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'search-empty';
+      empty.textContent = `No planet or moon matches "${input.value.trim()}"`;
+      list.appendChild(empty);
+    }
+    matches.forEach((body, i) => {
+      const li = document.createElement('li');
+      li.id = `search-option-${body.naif_id}`;
+      li.className = 'search-option';
+      li.setAttribute('role', 'option');
+      const dot = document.createElement('span');
+      dot.className = 'search-dot';
+      dot.style.background = body.color || 'var(--text-dim)';
+      const name = document.createElement('span');
+      name.className = 'search-name';
+      name.textContent = body.name;
+      const meta = document.createElement('span');
+      meta.className = 'search-meta';
+      meta.textContent = bodyType(body);
+      li.append(dot, name, meta);
+      // pointerdown, not click: fires before the input blurs and closes the list.
+      li.addEventListener('pointerdown', e => { e.preventDefault(); choose(i); });
+      li.addEventListener('pointermove', () => { if (active !== i) setActive(i); });
+      list.appendChild(li);
+    });
+    list.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    setActive(input.value.trim() && matches.length ? 0 : -1);
+  }
+  function close() {
+    list.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    setActive(-1);
+  }
+  function choose(index) {
+    const body = matches[index];
+    if (!body) return;
+    focusOnBody(body.naif_id);
+    input.value = '';
+    close();
+    input.blur();
+  }
+
+  input.addEventListener('focus', open);
+  input.addEventListener('input', open);
+  input.addEventListener('blur', close);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (list.hidden) open();
+      if (!matches.length) return;
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      setActive((active + step + matches.length) % matches.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      choose(active >= 0 ? active : 0);
+    } else if (e.key === 'Escape') {
+      input.value = '';
+      close();
+      input.blur();
+    }
+  });
+}
+
+function createStarfield() {
+  const geo = new THREE.BufferGeometry();
+  const count = 6000;
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const r = 15000 + Math.random() * 30000;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+    positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+    positions[i * 3 + 2] = r * Math.cos(phi);
+    const b = 0.5 + Math.random() * 0.5;
+    colors[i * 3] = b;
+    colors[i * 3 + 1] = b;
+    colors[i * 3 + 2] = b + Math.random() * 0.2;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({ size: 1.5, vertexColors: true, sizeAttenuation: false });
+  scene.add(new THREE.Points(geo, mat));
+}
+
+function createUniverseBackground() {
+  // 1. Giant Sphere — 32x16 segments: a backdrop sphere needs no silhouette detail
+  const geometry = new THREE.SphereGeometry(90000, 32, 16);
+
+  // 2. Load Texture (Ensure file exists in js/textures/)
+  // Use a dark background color as fallback
+  const material = new THREE.MeshBasicMaterial({
+    map: textureLoader.load('js/textures/4k_stars_milky_way.jpg'),
+    side: THREE.BackSide, // Render on the INSIDE of the sphere
+    color: 0xffffff
+  });
+
+  const skybox = new THREE.Mesh(geometry, material);
+
+  // 3. Rotate it slightly to match solar system obliquity
+  skybox.rotation.x = 60 * (Math.PI / 180);
+
+  scene.add(skybox);
+  return skybox;
+}
+
+// Bake a radial fade into the grid's vertex colours: full black (invisible
+// under additive blending with everything else) inside `inner` units of the
+// origin, ramping to the grid's original colour at `outer`. GridHelper lays
+// out a flat XZ plane, so the fade radius is sqrt(x² + z²) per vertex.
+// The glow sprite is additive, so black grid pixels add nothing on top of it.
+function applyGridRadialFade(grid, inner = 1800, outer = 4000) {
+  const pos = grid.geometry.getAttribute('position');
+  const col = grid.geometry.getAttribute('color');
+  if (!pos || !col) return;
+  for (let i = 0; i < pos.count; i++) {
+    const r = Math.hypot(pos.getX(i), pos.getZ(i));
+    const f = gridFadeFactor(r, inner, outer);
+    col.setXYZ(i, col.getX(i) * f, col.getY(i) * f, col.getZ(i) * f);
+  }
+  col.needsUpdate = true;
+}
+
+// ── API ────────────────────────────────────────────────────────────────────
+async function fetchEpochRange() {
+  try {
+    const res = await fetch(`${EPHEMERIS_API}/epoch-range`);
+    if (res.ok) {
+      const data = await res.json();
+      epochRange.start = data.start_iso;
+      epochRange.end = data.end_iso;
+    }
+  } catch (_) {}
+}
+
+async function fetchBodies() {
+  try {
+    const res = await fetch(`${EPHEMERIS_API}/bodies`);
+    bodies = await res.json();
+    setStatus('ok', `${bodies.length} bodies loaded`);
+  } catch (e) {
+    setStatus('err', 'API unreachable');
+    console.error(e);
+  }
+}
+
+function getPlanets() {
+  // Only top-level bodies (no moons) for selects
+  return bodies.filter(b => b.parent_id === null && b.naif_id !== 10);
+}
+
+function populateSelects() {
+  const planets = getPlanets();
+  const selectors = [
+    'pc-origin', 'pc-target',
+    'plan-origin', 'plan-target',
+  ];
+  for (const id of selectors) {
+    const sel = document.getElementById(id);
+    if (!sel) continue;
+    sel.innerHTML = '';
+    for (const p of planets) {
+      const opt = document.createElement('option');
+      opt.value = p.name.toLowerCase();
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    }
+  }
+  // Defaults
+  document.getElementById('plan-origin').value = 'earth';
+  document.getElementById('plan-target').value = 'mars';
+}
+
+async function fetchOrbits() {
+  const planets = bodies.filter(b => b.parent_id === null && b.naif_id !== 10);
+  
+  for (const body of planets) {
+    try {
+      // VISUAL TWEAK: simplify the request to get a clean single loop
+      // We estimate one year based on PLANET_INFO (or default to 1 Earth year)
+      // If we ask for 30 years, the line looks thick and messy.
+      
+      let daysToFetch = 365; // Default Earth
+      const info = PLANET_INFO[body.naif_id];
+      
+      // Parse "88 days" or "12 years" from your text dictionary (Simple Heuristic)
+      if (info && info.year) {
+         if (info.year.includes('days')) daysToFetch = parseInt(info.year) + 10; // +buffer
+         if (info.year.includes('years')) daysToFetch = parseInt(info.year) * 365;
+         if (info.year.includes('yr')) daysToFetch = parseInt(info.year) * 365; // Handle "230 M yr" cautiously
+         if (daysToFetch > 10000) daysToFetch = 10000; // Cap at ~30 years
+      }
+
+      // Calculate end date based on One Period
+      const startDate = new Date(epochRange.start);
+      const endDate = new Date(Math.min(startDate.getTime() + daysToFetch * 86400000, new Date(epochRange.end).getTime()));
+      const endIso = endDate.toISOString();
+
+      // Step size: For Mercury (88 days) step 3 is too blocky. Use 1 for inner planets.
+      const step = daysToFetch < 200 ? 1 : 5; 
+
+      const res = await fetch(
+        `${EPHEMERIS_API}/bodies/${body.name.toLowerCase()}/ephemeris?start=${encodeURIComponent(epochRange.start)}&end=${encodeURIComponent(endIso)}&step_days=${step}&scene_units=true`
+      );
+      const data = await res.json();
+
+      orbitPoints[data.body] = data.points;
+      // CALL DRAWING FUNCTION
+      drawOrbitPath(body.naif_id, data.points);
+
+    } catch (e) {
+      console.warn(`Failed to fetch orbit for ${body.name}:`, e);
+    }
+  }
+}
+
+
+function removePlanetTrail(bodyNaifId) {
+  const prev = planetTrails[bodyNaifId];
+  if (!prev) return;
+  prev.parent?.remove(prev);
+  prev.geometry?.dispose?.();
+  // material is the shared planetTrailMaterial — never disposed here
+  planetTrails[bodyNaifId] = null;
+  requestRender();
+}
+
+// One shared trail material — the per-point fade lives in the color attribute.
+const planetTrailMaterial = new THREE.ShaderMaterial({
+    uniforms: {},
+    vertexShader: `
+      varying vec3 vColor;
+      void main() {
+        vColor = color;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = 3.0;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        float d = length(gl_PointCoord - vec2(0.5));
+        if (d > 0.5) discard;
+        gl_FragColor = vec4(vColor, 1.0);
+      }
+    `,
+    vertexColors: true,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+});
+
+function updatePlanetTrail(body, worldPosVec3) {
+  const id = body.naif_id;
+  if (!planetTrailHist[id]) planetTrailHist[id] = new TrailBuffer(TRAIL_MAX_POINTS);
+  const hist = planetTrailHist[id];
+
+  // push newest position
+  hist.push([worldPosVec3.x, worldPosVec3.y, worldPosVec3.z]);
+
+  // Create the preallocated trail once; afterwards rewrite in place.
+  if (!planetTrails[id]) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX_POINTS * 3), 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX_POINTS * 3), 3));
+    geo.setDrawRange(0, 0);
+
+    const pts = new THREE.Points(geo, planetTrailMaterial);
+    pts.frustumCulled = false; // draw range changes; skip stale bounding-volume culls
+    pts.userData.type = 'planetTrail';
+    pts.userData.naifId = id;
+
+    scene.add(pts);
+    planetTrails[id] = pts;
+  }
+
+  const points = planetTrails[id];
+  const posAttr = points.geometry.attributes.position;
+  const colAttr = points.geometry.attributes.color;
+  const base = new THREE.Color(body.color);
+  const n = hist.count();
+
+  for (let i = 0; i < n; i++) {
+    const v = hist.get(i);
+    posAttr.setXYZ(i, v[0], v[1], v[2]);
+
+    // fade: old dim -> new bright
+    const t = n > 1 ? i / (n - 1) : 1;
+    const brightness = 0.05 + 0.95 * t;
+    colAttr.setXYZ(i, base.r * brightness, base.g * brightness, base.b * brightness);
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  points.geometry.setDrawRange(0, n);
+  requestRender();
+}
+
+function createCss2DLabel(text) {
+  const div = document.createElement('div');
+  div.className = 'planet-label';
+  div.textContent = text;
+
+  const label = new CSS2DObject(div);
+  label.userData.isPlanetLabel = true;
+  return label;
+}
+
+function ensureBodyMesh(body) {
+  if (bodyMeshes[body.naif_id]) return bodyMeshes[body.naif_id];
+
+  const visualSizeFactor = 10;
+  const rawRadius = (DISPLAY_RADIUS[body.naif_id] || 0.8);
+  const radius = rawRadius * visualSizeFactor;
+  const textureFile = TEXTURE_MAP[body.naif_id];
+
+  // 1. ROOT GROUP: Handles Position (Orbit)
+  const rootGroup = new THREE.Group();
+  rootGroup.userData = { body, naifId: body.naif_id };
+
+  // 2. TILT GROUP: Handles Axial Tilt (Static)
+  const tiltGroup = new THREE.Group();
+  
+  // Apply axial tilt here (Z-axis only)
+  // Earth = 23.5, Mars = 25, Saturn = 26.7, Uranus = 98 (side)
+  let tiltDeg = 0;
+  if (body.naif_id === 399) tiltDeg = 23.5;
+  if (body.naif_id === 499) tiltDeg = 25.0;
+  if (body.naif_id === 699) tiltDeg = 26.7;
+  if (body.naif_id === 799) tiltDeg = 97.7;
+  
+  tiltGroup.rotation.z = tiltDeg * (Math.PI / 180);
+  rootGroup.add(tiltGroup);
+
+  // 3. SPIN MESH: The Visual Sphere + Rings (Rotates Y in loop)
+  let spinMesh; // This is what we will rotate in animate()
+
+  // ── A. THE SUN ──────────────────────────────────────────────
+  if (body.naif_id === 10) {
+    const geo = new THREE.SphereGeometry(radius, 64, 64);
+    const mat = new THREE.MeshBasicMaterial({
+      map: textureFile ? textureLoader.load(`js/textures/${textureFile}`) : null,
+      color: textureFile ? 0xffffff : new THREE.Color(body.color)
+    });
+    spinMesh = new THREE.Mesh(geo, mat);
+
+    // Glow (Add to Root, not Spin, so it doesn't spin weirdly if not spherical)
+    // Sun gets a larger, slightly brighter corona since the lens flare is gone.
+    const isSun = body.naif_id === 10;
+    const spriteMat = new THREE.SpriteMaterial({
+      map: createGlowTexture(),
+      color: 0xfff0c0, transparent: true, opacity: isSun ? 0.55 : 0.4,
+      blending: THREE.AdditiveBlending
+    });
+    const glow = new THREE.Sprite(spriteMat);
+    const glowScale = radius * (isSun ? 6.0 : 3.0);
+    glow.scale.set(glowScale, glowScale, 1);
+    rootGroup.add(glow);
+    if (isSun) {
+      // Screen-space halo: constant on-screen size, so the Sun still reads from
+      // the zoomed-out overview, without the lens flare's per-frame sampling.
+      const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: createGlowTexture(), color: 0xfff0c0, transparent: true, opacity: 0.45,
+        blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: false
+      }));
+      halo.scale.set(0.16, 0.16, 1);
+      rootGroup.add(halo);
+    }
+  }
+
+  // ── B. EARTH (Clouds + Specular) ─────────────────────────────
+  else if (body.naif_id === 399) {
+    const geo = new THREE.SphereGeometry(radius, 64, 64);
+    const matParams = {
+      map: textureLoader.load(`js/textures/${textureFile}`),
+      roughness: 0.5, metalness: 0.1
+    };
+    spinMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial(matParams));
+
+    // Clouds (Child of SpinMesh, but rotates slightly faster in code)
+    if (TEXTURE_MAP['399_clouds']) {
+        const cloudGeo = new THREE.SphereGeometry(radius * 1.015, 64, 64);
+        const cloudMat = new THREE.MeshStandardMaterial({
+            map: textureLoader.load(`js/textures/${TEXTURE_MAP['399_clouds']}`),
+            transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, side: THREE.DoubleSide
+        });
+        const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
+        spinMesh.add(cloudMesh);
+        spinMesh.userData.cloudMesh = cloudMesh; 
+    }
+  }
+
+  // ── C. STANDARD PLANETS (Saturn, etc) ────────────────────────
+  else {
+    const geo = new THREE.SphereGeometry(radius, 64, 64);
+    const mat = new THREE.MeshStandardMaterial({
+      map: textureFile ? textureLoader.load(`js/textures/${textureFile}`) : null,
+      color: textureFile ? 0xffffff : new THREE.Color(body.color),
+      roughness: 0.7, metalness: 0.1
+    });
+    spinMesh = new THREE.Mesh(geo, mat);
+  }
+
+  // Add SpinMesh to TiltGroup
+  tiltGroup.add(spinMesh);
+  
+  // Store ref for animation loop
+  rootGroup.userData.spinMesh = spinMesh;
+
+  // ── RINGS (Saturn) ───────────────────────────────────────────
+  // Rings are attached to the SPIN MESH, so they tilt with the group
+  // and spin with the planet (though spinning a uniform ring isn't visible, it's physically correct)
+  if (body.naif_id === 699 && TEXTURE_MAP['699_ring']) {
+      const inner = radius * 1.3;
+      const outer = radius * 2.2;
+      const ringGeo = new THREE.RingGeometry(inner, outer, 64);
+      
+      // Fix UVs
+      const pos = ringGeo.attributes.position;
+      const v3 = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i++){
+          v3.fromBufferAttribute(pos, i);
+          const len = v3.length(); 
+          ringGeo.attributes.uv.setXY(i, (len - inner) / (outer-inner), 0.5); 
+      }
+      
+      const ringMat = new THREE.MeshStandardMaterial({
+          map: textureLoader.load(`js/textures/${TEXTURE_MAP['699_ring']}`),
+          color: 0xdddddd, side: THREE.DoubleSide, transparent: true, opacity: 0.9
+      });
+      
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2; // Flat relative to planet equator
+      ring.castShadow = true; 
+      ring.receiveShadow = true;
+      spinMesh.add(ring);
+  }
+
+  // ── EXTRAS (Hitbox & Labels - attached to ROOT so they don't spin/tilt weirdly) ──
+  const hitboxRadius = Math.max(radius * 2, 3.0);
+  const hitbox = new THREE.Mesh(
+    new THREE.SphereGeometry(hitboxRadius, 12, 12),
+    new THREE.MeshBasicMaterial({ visible: false })
+  );
+  hitbox.userData = { isHitbox: true, parentBody: body };
+  rootGroup.add(hitbox);
+  rootGroup.userData.hitboxMesh = hitbox;
+
+  const label = createCss2DLabel(body.name);
+  label.position.set(0, radius * 1.5 + 2, 0);
+  rootGroup.add(label); // Label stays upright regardless of planet tilt
+
+  scene.add(rootGroup);
+  bodyMeshes[body.naif_id] = rootGroup;
+  requestRender();
+  return rootGroup;
+}
+
+function createGlowTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, 'rgba(255,248,200,1)');
+  grad.addColorStop(0.3, 'rgba(255,220,100,0.4)');
+  grad.addColorStop(1, 'rgba(255,200,50,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  return tex;
+}
+
+function createTextSprite(text, color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.font = "600 42px 'Source Sans 3', sans-serif";
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.8;
+  ctx.fillText(text, 128, 64);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  return new THREE.Sprite(mat);
+}
+
+// ── WebSocket Ephemeris Streaming ──────────────────────────────────────────
+function connectEphemeris() {
+  if (ephemerisWs) {
+    try { ephemerisWs.close(); } catch (_) {}
+  }
+
+  ephemerisWs = new WebSocket(`${WS}/ws/ephemeris/stream`);
+
+  // While the tab is hidden, keep only the latest payload; applying a burst of
+  // stale snapshots on return would snap bodies through time. No protocol change.
+  let latestHiddenSnapshot = null;
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && latestHiddenSnapshot && ephemerisWs.readyState === WebSocket.OPEN) {
+      const snap = latestHiddenSnapshot;
+      latestHiddenSnapshot = null;
+      ephemerisWs.onmessage({ data: JSON.stringify(snap) });
+      requestRender();
+    }
+  });
+
+  ephemerisWs.onopen = () => {
+    setStatus('ok', 'Streaming');
+    // Send config — only planets (no moons for now to keep it clean)
+    const planetIds = bodies.filter(b => b.parent_id === null).map(b => b.naif_id);
+    ephemerisWs.send(JSON.stringify({
+      body_ids: planetIds,
+      start_iso: epochRange.start,
+      speed: simSpeed,
+      fps: 30,
+      scene_units: true,
+    }));
+  };
+
+    ephemerisWs.onmessage = (event) => {
+    const snap = JSON.parse(event.data);
+
+    if (document.hidden) {
+      latestHiddenSnapshot = snap;
+      return;
+    }
+
+    // CRITICAL FIX:
+    // If we are flying a mission (isSimulationMaster = true), 
+    // we ignore the epoch from the server to prevent "time fighting".
+    // We only want the body positions corresponding to the time we requested.
+    if (!isSimulationMaster) {
+        currentDate = new Date(snap.epoch_iso);
+    }
+
+    updatePlanetPositions(snap);
+    requestRender();
+  };
+
+
+  ephemerisWs.onclose = () => {
+    setStatus('err', 'Disconnected');
+    // Reconnect after 3s
+    setTimeout(connectEphemeris, 3000);
+  };
+
+  ephemerisWs.onerror = () => {
+    setStatus('err', 'WS error');
+  };
+}
+
+function updatePlanetPositions(snapshot) {
+  // Update epoch display
+  const dateStr = snapshot.epoch_iso ? snapshot.epoch_iso.split('T')[0] : '';
+  if (dateStr !== lastStatusDateStr) {
+    lastStatusDateStr = dateStr;
+    statusTextEl.textContent = `Streaming  ${dateStr}`;
+  }
+
+  for (const bd of snapshot.bodies) {
+    const bodyInfo = bodies.find(b => b.naif_id === bd.body_id);
+    if (!bodyInfo) continue;
+
+    const mesh = ensureBodyMesh(bodyInfo);
+    // Backend: x=ecliptic-x, y=ecliptic-y, z=ecliptic-z
+    // Three.js: x=right, y=up, z=toward-camera
+    // Map: three.x = ecliptic.x, three.y = ecliptic.z, three.z = -ecliptic.y
+    mesh.position.set(bd.position[0], bd.position[2], -bd.position[1]);
+    const simMs = new Date(snapshot.epoch_iso).getTime();
+    const id = bodyInfo.naif_id;
+
+    if (!lastTrailSimTime[id]) {
+      lastTrailSimTime[id] = simMs;
+      updatePlanetTrail(bodyInfo, mesh.position);
+    } else {
+      const delta = simMs - lastTrailSimTime[id];
+      if (delta >= TRAIL_SIM_INTERVAL_MS) {
+        lastTrailSimTime[id] = simMs;
+        updatePlanetTrail(bodyInfo, mesh.position);
+      }
+    }
+  }
+}
+
+function onMouseClick(event) {
+  if (event.target !== renderer.domElement) return;
+  // 1. CHECK FOR DRAG (The Fix)
+  // Calculate how far the mouse moved between Down and Up
+  const dx = event.clientX - mouseDownPos.x;
+  const dy = event.clientY - mouseDownPos.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+
+  // If moved more than 5 pixels, assume it was a drag/rotation.
+  // STOP execution here. Do NOT unlock camera.
+  if (distance > 5) return;
+
+
+  // 2. EXISTING LOGIC...
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+
+  // Intersect with planets
+  const meshes = Object.values(bodyMeshes);
+  
+  // Note: Since we switched to Groups (rootGroup), we need recursive=true
+  const intersects = raycaster.intersectObjects(meshes, true);
+
+  if (intersects.length > 0) {
+    const hitObj = intersects[0].object;
+
+    // Handle Hitbox
+    if (hitObj.userData.isHitbox) {
+      focusOnBody(hitObj.userData.parentBody.naif_id);
+      return;
+    }
+
+    // Handle Visual Mesh (traverse up to find root group data)
+    let object = hitObj;
+    // Walk up until we find the root group with 'body' data
+    while(object.parent && !object.userData.body) {
+       object = object.parent;
+    }
+
+    if (object.userData.body) {
+      focusOnBody(object.userData.body.naif_id);
+    }
+  } else {
+    // Clicked empty space
+    // Only unlock if we actually CLICKED, which we verified in Step 1
+    if (focusedBodyId !== null) {
+      unlockCamera();
+    }
+  }
+}
+
+
+function unlockCamera() {
+  focusedBodyId = null;
+  // If we were flying, stop flying
+  if (activeMission) {
+    scene.remove(activeMission.mesh);
+    activeMission = null;
+    isSimulationMaster = false; // Hand control back to server
+    requestRender();
+  }
+  document.getElementById('planet-info-panel').classList.add('hidden');
+}
+
+
+
+
+function focusOnBody(naifId) {
+  focusedBodyId = naifId;
+  const mesh = bodyMeshes[naifId];
+  if (!mesh) return;
+
+  isFlyingToTarget = true;
+  controls.enableDamping = false;
+  flyStartMs = performance.now();
+  flyFromCameraPos.copy(camera.position);
+  flyFromTarget.copy(controls.target);
+  requestRender();
+
+  previousBodyPosition.copy(mesh.position);
+
+  // 3. Update UI
+  updatePlanetInfoPanel(naifId, mesh.userData.body);
+}
+
+
+function updatePlanetInfoPanel(id, bodyData) {
+  const panel = document.getElementById('planet-info-panel');
+  
+  // Get static info from our new imported dictionary
+  const info = PLANET_INFO[id] || { 
+    type: 'Unknown', radius: '?', day: '?', year: '?', temp: '?', 
+    gravity: '?', moons: '?', atm: '?', desc: 'No data available.' 
+  };
+
+  // 1. Update Header (Name & Color)
+  document.getElementById('pi-name').textContent = bodyData.name;
+  
+  const swatch = document.getElementById('pi-color-swatch');
+  swatch.style.backgroundColor = bodyData.color || '#fff';
+  swatch.style.boxShadow = `0 0 15px ${bodyData.color || '#fff'}`; // Add glow
+
+  // 2. Update Stats (Existing)
+  document.getElementById('pi-type').textContent = info.type;
+  document.getElementById('pi-radius').textContent = info.radius;
+  document.getElementById('pi-day').textContent = info.day;
+  document.getElementById('pi-year').textContent = info.year;
+  document.getElementById('pi-temp').textContent = info.temp;
+  document.getElementById('pi-desc').textContent = info.desc;
+
+  // 3. Update Stats (NEW FIELDS)
+  // These IDs must match what you added to index.html
+  const elGravity = document.getElementById('pi-gravity');
+  if(elGravity) elGravity.textContent = info.gravity || 'N/A';
+
+  const elMoons = document.getElementById('pi-moons');
+  if(elMoons) elMoons.textContent = info.moons || '0';
+
+  const elAtm = document.getElementById('pi-atm');
+  if(elAtm) elAtm.textContent = info.atm || 'None';
+
+  // 4. Show panel
+  panel.classList.remove('hidden');
+}
+
+
+
+function onMouseMove(event) {
+  // Only record the pointer; the raycast runs once per frame from animate().
+  pointerClient = { x: event.clientX, y: event.clientY };
+  pointerOverCanvas = event.target === renderer.domElement;
+  pointerMoved = true;
+  if (!pointerOverCanvas) {
+    document.getElementById('body-tooltip').classList.add('hidden');
+  }
+}
+
+// One raycast per frame at most, against the flat hitbox array, no recursion.
+// Called from animate() only when the pointer moved this frame.
+function updateHoverRaycast() {
+  if (!pointerMoved) return;
+  pointerMoved = false;
+
+  if (!pointerOverCanvas) {
+    if (hoveredBodyId !== null) resetHover();
+    return;
+  }
+
+  mouse.x = (pointerClient.x / window.innerWidth) * 2 - 1;
+  mouse.y = -(pointerClient.y / window.innerHeight) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+  // Hitboxes are invisible spheres attached to each root group; they carry
+  // parentBody, so recursion into spin meshes/clouds/rings is unnecessary.
+  const hitboxes = Object.values(bodyMeshes).map(g => g.userData.hitboxMesh);
+  const intersects = raycaster.intersectObjects(hitboxes, false);
+
+  if (intersects.length > 0) {
+    const body = intersects[0].object.userData.parentBody;
+    if (body) {
+      if (hoveredBodyId !== body.naif_id) {
+        resetHover();
+        hoveredBodyId = body.naif_id;
+        document.body.style.cursor = 'pointer';
+        highlightBody(hoveredBodyId, true);
+        showTooltipFromPointer(body.name);
+      }
+      updateTooltipPositionFromPointer();
+    }
+  } else {
+    if (hoveredBodyId !== null) {
+      resetHover();
+    }
+  }
+}
+
+function showTooltipFromPointer(text) {
+  const tooltip = document.getElementById('body-tooltip');
+  tooltip.textContent = text;
+  tooltip.classList.remove('hidden');
+  updateTooltipPositionFromPointer();
+}
+
+function updateTooltipPositionFromPointer() {
+  const tooltip = document.getElementById('body-tooltip');
+  if (!tooltip.classList.contains('hidden')) {
+    tooltip.style.left = (pointerClient.x + 15) + 'px';
+    tooltip.style.top = (pointerClient.y + 15) + 'px';
+  }
+}
+
+
+function resetHover() {
+  if (hoveredBodyId !== null) {
+    highlightBody(hoveredBodyId, false);
+    hoveredBodyId = null;
+    document.body.style.cursor = 'auto';
+    document.getElementById('body-tooltip').classList.add('hidden');
+  }
+}
+
+function highlightBody(naifId, isHovered) {
+  const mesh = bodyMeshes[naifId];
+  if (!mesh) return;
+
+  // The Sun (ID 10) is a BasicMaterial and already glows, so we skip it or handle differently
+  if (naifId === 10) return; 
+
+  // For planets (StandardMaterial)
+  if (mesh.material && mesh.material.emissive) {
+    // Save original intensity if not saved yet
+    if (mesh.userData.originalEmissive === undefined) {
+      mesh.userData.originalEmissive = mesh.material.emissiveIntensity;
+      mesh.userData.originalColor = mesh.material.color.getHex();
+    }
+
+    if (isHovered) {
+      // Make it glow brighter
+      mesh.material.emissiveIntensity = 0.8; 
+      // Optional: lighten the color slightly
+      mesh.material.color.setHex(0xffffff); 
+    } else {
+      // Reset
+      mesh.material.emissiveIntensity = mesh.userData.originalEmissive;
+      mesh.material.color.setHex(mesh.userData.originalColor);
+    }
+  }
+}
+
+
+
+function showTooltip(event, text) {
+  const tooltip = document.getElementById('body-tooltip');
+  tooltip.textContent = text;
+  tooltip.classList.remove('hidden');
+  updateTooltipPosition(event);
+}
+
+function updateTooltipPosition(event) {
+  const tooltip = document.getElementById('body-tooltip');
+  if (!tooltip.classList.contains('hidden')) {
+    tooltip.style.left = (event.clientX + 15) + 'px';
+    tooltip.style.top = (event.clientY + 15) + 'px';
+  }
+}
+
+
+// ── Lambert Transfer ───────────────────────────────────────────────────────
+// (Manual UI removed, helper used by optimizer)
+function drawTransferArc(points) {
+  // Remove existing
+  if (transferLine) {
+    scene.remove(transferLine);
+    transferLine.geometry.dispose();
+    transferLine.material.dispose();
+    transferLine = null;
+  }
+  clearMarkers();
+
+  const positions = [];
+  for (const p of points) {
+    positions.push(p.x, p.z, -p.y);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+  // Gradient color line
+  const mat = new THREE.LineBasicMaterial({
+    color: 0x8cb8e8,
+    linewidth: 2,
+  });
+
+  transferLine = new THREE.Line(geo, mat);
+  scene.add(transferLine);
+  requestRender();
+
+  // Also add departure and arrival markers
+  addMarker(points[0], 0x6cc18a, 2);               // green — departure
+  addMarker(points[points.length - 1], 0xe76f51, 2); // red — arrival
+}
+
+// ── Draw Static Orbit (Gray Ellipse) ───────────────────────────────────────
+function drawOrbitPath(bodyId, points) {
+  // 1. Remove existing if any
+  if (orbitLines[bodyId]) {
+    scene.remove(orbitLines[bodyId]);
+    orbitLines[bodyId].geometry.dispose();
+    orbitLines[bodyId].material.dispose();
+  }
+
+  if (!points || points.length < 3) return;
+
+  // 2. Filter points to get roughly ONE full orbit (single loop)
+  // The API might return 30 years of data. We only want to draw 1 revolution for a clean look.
+  const singleLoopPoints = [];
+  const startV = new THREE.Vector3(points[0].x, points[0].z, -points[0].y);
+  singleLoopPoints.push(startV.x, startV.y, startV.z);
+
+  // We simply grab points until we are "close" to the start again, 
+  // OR just limit by a reasonable count if checking distance is too heavy.
+  // For simplicity here: We just draw the entire set provided by the API 
+  // but we make it transparent so overlaps aren't ugly.
+  // Converting backend (x, y, z) -> Scene (x, z, -y)
+  
+  const positions = [];
+  points.forEach(p => {
+    positions.push(p.x, p.z, -p.y);
+  });
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+  // 3. Create the Line
+  const mat = new THREE.LineBasicMaterial({
+    color: 0x555555, // Dark Gray
+    transparent: true,
+    opacity: 0.3,    // Faint, so it doesn't distract from the mission line
+    linewidth: 1     // Note: WebGL linewidth is always 1 on most browsers
+  });
+
+  const line = new THREE.Line(geo, mat); // Use LineLoop if you want to force close, but Line is safer for open ephemeris
+  scene.add(line);
+  orbitLines[bodyId] = line;
+  requestRender();
+}
+
+
+const markers = [];
+function addMarker(point, color, size) {
+  const geo = new THREE.SphereGeometry(size, 12, 12);
+  const mat = new THREE.MeshBasicMaterial({ color });
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(point.x, point.z, -point.y);
+  scene.add(m);
+  markers.push(m);
+  requestRender();
+}
+
+function clearMarkers() {
+  for (const m of markers) {
+    scene.remove(m);
+    m.geometry.dispose();
+    m.material.dispose();
+  }
+  markers.length = 0;
+  requestRender();
+}
+
+
+
+// ── Multi-Leg Visualization ────────────────────────────────────────────────
+
+function clearMultiLegArcs() {
+  for (const line of multiLegLines) {
+    scene.remove(line);
+    line.geometry.dispose();
+    line.material.dispose();
+  }
+  multiLegLines = [];
+  requestRender();
+}
+
+function drawMultiLegArcs(legs) {
+  clearMultiLegArcs();
+  clearMarkers();
+
+  if (!legs || legs.length === 0) return;
+
+  // Draw each leg
+  legs.forEach((leg, index) => {
+    const points = leg.trajectory_points;
+    if (!points || points.length === 0) return;
+
+    const positions = [];
+    for (const p of points) {
+      positions.push(p.x, p.z, -p.y);
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+    // Color cycle for legs to distinguish them
+    const colors = [0x8cb8e8, 0xf0a83c, 0x6cc18a, 0xe9c46a];
+    const color = colors[index % colors.length];
+
+    const mat = new THREE.LineBasicMaterial({
+      color: color,
+      linewidth: 2,
+    });
+
+    const line = new THREE.Line(geo, mat);
+    scene.add(line);
+    multiLegLines.push(line);
+    requestRender();
+
+    // Markers
+    if (index === 0) {
+      addMarker(points[0], 0x6cc18a, 2); // Start (Green)
+    }
+    // End of current leg (which is start of next or final destination)
+    // If it's the last leg, make it red. If intermediate (flyby), make it yellow/orange.
+    const isLast = index === legs.length - 1;
+    const markerColor = isLast ? 0xe76f51 : 0xe9c46a;
+    addMarker(points[points.length - 1], markerColor, 2);
+  });
+}
+
+// ── Pork-Chop Plot ─────────────────────────────────────────────────────────
+async function generatePorkchop(config) {
+  const payload = {
+    origin: config.origin,
+    target: config.target,
+    dep_start: config.dep_start,
+    dep_end: config.dep_end,
+    tof_min_days: config.tof_min_days || 100,
+    tof_max_days: config.tof_max_days || 400,
+    dep_steps: 60,
+    tof_steps: 60,
+  };
+
+  try {
+    const data = await calculateJob('porkchop', payload);
+    refreshMissionHistory();
+    document.getElementById('porkchop-overlay').classList.remove('hidden');
+    renderPorkchop(data);
+  } catch (e) {
+    alert('Pork-chop error: ' + e.message);
+  }
+}
+
+function renderPorkchop(data) {
+  const canvas = document.getElementById('porkchop-canvas');
+  const container = document.getElementById('porkchop-container');
+
+  // Set canvas resolution — container must be visible (overlay shown first)
+  const size = Math.min(container.clientWidth, 640) || 640;
+  canvas.width = size;
+  canvas.height = size;
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+
+  const ctx = canvas.getContext('2d');
+  const grid = data.dv_grid;
+  const depCount = grid.length;        // departure steps (row index i)
+  const tofCount = grid[0].length;     // TOF steps (col index j)
+
+  // Find min/max dv (exclude null)
+  let minDv = Infinity, maxDv = 0;
+  for (const row of grid) {
+    for (const v of row) {
+      if (v != null && v < 50) {
+        minDv = Math.min(minDv, v);
+        maxDv = Math.max(maxDv, v);
+      }
+    }
+  }
+  // Cap max for better contrast
+  maxDv = Math.min(maxDv, minDv * 4);
+
+  // Departure on x-axis, TOF on y-axis (conventional porkchop orientation)
+  const cellW = size / depCount;
+  const cellH = size / tofCount;
+
+  for (let i = 0; i < depCount; i++) {
+    for (let j = 0; j < tofCount; j++) {
+      const v = grid[i][j];
+      if (v == null || v > maxDv * 1.5) {
+        ctx.fillStyle = '#070d18';
+      } else {
+        const t = Math.max(0, Math.min(1, (v - minDv) / (maxDv - minDv)));
+        ctx.fillStyle = dvColor(t);
+      }
+      // x = departure index, y = TOF index (inverted so low TOF at bottom)
+      ctx.fillRect(i * cellW, (tofCount - 1 - j) * cellH, cellW + 0.5, cellH + 0.5);
+    }
+  }
+
+  // Axis labels
+  const depIsos = data.departure_isos;
+  const tofs = data.tof_days;
+
+  ctx.fillStyle = '#a6b2c3';
+  ctx.font = "11px 'Source Sans 3', sans-serif";
+  ctx.textAlign = 'center';
+
+  // Departure date labels (x-axis at bottom) — iterate over depCount
+  const depStep = Math.max(1, Math.floor(depCount / 5));
+  for (let i = 0; i < depCount; i += depStep) {
+    const label = depIsos[i] ? depIsos[i].split('T')[0].slice(5) : '';
+    ctx.fillText(label, i * cellW + cellW / 2, size - 4);
+  }
+
+  // TOF labels (y-axis on left) — iterate over tofCount
+  ctx.textAlign = 'left';
+  const tofStep = Math.max(1, Math.floor(tofCount / 5));
+  for (let j = 0; j < tofCount; j += tofStep) {
+    ctx.fillText(`${tofs[j].toFixed(0)}d`, 4, (tofCount - 1 - j) * cellH + cellH / 2 + 3);
+  }
+
+  // Legend
+  document.getElementById('porkchop-legend').textContent =
+    `${data.origin} → ${data.target}  |  Min ΔV: ${minDv.toFixed(2)} km/s  |  Range: ${minDv.toFixed(1)} – ${maxDv.toFixed(1)} km/s`;
+
+  // Tooltip on hover
+  canvas.onmousemove = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (size / rect.width);
+    const y = (e.clientY - rect.top) * (size / rect.height);
+    const depIdx = Math.floor(x / cellW);
+    const tofIdx = tofCount - 1 - Math.floor(y / cellH);
+    if (depIdx >= 0 && depIdx < depCount && tofIdx >= 0 && tofIdx < tofCount) {
+      const v = grid[depIdx][tofIdx];
+      const dep = depIsos[depIdx] ? depIsos[depIdx].split('T')[0] : '?';
+      const tof = tofs[tofIdx] ? tofs[tofIdx].toFixed(0) : '?';
+      const tip = document.getElementById('porkchop-tooltip');
+      tip.textContent = `Dep: ${dep}  TOF: ${tof}d  ΔV: ${v != null ? v.toFixed(2) + ' km/s' : 'N/A'}`;
+      tip.style.left = (e.clientX + 12) + 'px';
+      tip.style.top = (e.clientY - 24) + 'px';
+      tip.classList.remove('hidden');
+    }
+  };
+  canvas.onmouseleave = () => {
+    document.getElementById('porkchop-tooltip').classList.add('hidden');
+  };
+}
+
+function dvColor(t) {
+  // Perceptually-uniform Cividis interpolation (reversed: low = yellow, high = navy)
+  const n = CIVIDIS.length - 1;
+  const idx = Math.min(t, 1 - 1e-9) * n;
+  const i = Math.floor(idx);
+  const f = idx - i;
+  const a = CIVIDIS[i], b = CIVIDIS[Math.min(i + 1, n)];
+  const r = Math.floor((a[0] + (b[0] - a[0]) * f) * 255);
+  const g = Math.floor((a[1] + (b[1] - a[1]) * f) * 255);
+  const bl = Math.floor((a[2] + (b[2] - a[2]) * f) * 255);
+  return `rgb(${r},${g},${bl})`;
+}
+
+// ── Optimizer ──────────────────────────────────────────────────────────────
+async function runOptimizer(config, onProgress, onComplete) {
+  try {
+    const result = await calculateJob('optimization_single', {
+      origin: config.origin, target: config.target,
+      dep_start: config.dep_start, dep_end: config.dep_end,
+      tof_min_days: config.tof_min_days || 100, tof_max_days: config.tof_max_days || 400,
+      population_size: config.population_size || 30, max_iterations: config.max_iterations || 100,
+      mode: config.mode || 'pareto',
+    }, onProgress);
+    drawTransferArc(result.trajectory_points);
+    refreshMissionHistory();
+    if (onComplete) onComplete({ ...result.optimization, status: 'complete', result });
+  } catch (e) {
+    if (onComplete) onComplete({ status: 'failed', error: e.message });
+  }
+}
+
+// ── Multi-leg Optimizer ───────────────────────────────────────────────────
+async function runMultiLegOptimizer(config, onProgress, onComplete) {
+  try {
+    const result = await calculateJob('optimization_multi', {
+      body_sequence: config.body_sequence, dep_start: config.dep_start, dep_end: config.dep_end,
+      leg_tof_bounds: config.leg_tof_bounds, population_size: config.population_size || 40,
+      max_iterations: config.max_iterations || 200, mode: config.mode || 'pareto',
+    }, onProgress);
+    drawMultiLegArcs(result.legs);
+    refreshMissionHistory();
+    if (onComplete) onComplete({ ...result.optimization, status: 'complete', result });
+  } catch (e) {
+    if (onComplete) onComplete({ status: 'failed', error: e.message });
+  }
+}
+
+// ── Simulation Controls ────────────────────────────────────────────────────
+function updateSimSpeed(val) {
+  simSpeed = val;
+  document.getElementById('sim-speed-val').textContent = val;
+  if (ephemerisWs && ephemerisWs.readyState === WebSocket.OPEN) {
+    ephemerisWs.send(JSON.stringify({ speed: val }));
+  }
+}
+
+function togglePause() {
+  simPaused = !simPaused;
+  const btn = document.getElementById('btn-pause');
+  btn.setAttribute('aria-pressed', String(simPaused));
+  btn.setAttribute('aria-label', simPaused ? 'Resume simulation' : 'Pause simulation');
+  btn.title = btn.getAttribute('aria-label');
+  if (ephemerisWs && ephemerisWs.readyState === WebSocket.OPEN) {
+    ephemerisWs.send(simPaused ? 'pause' : 'resume');
+  }
+}
+
+// ── Status Bar ─────────────────────────────────────────────────────────────
+function setStatus(state, text) {
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  dot.className = 'dot ' + state;
+  txt.textContent = text;
+  txt.textContent = text;
+}
+
+// ── Presets ────────────────────────────────────────────────────────────────
+function loadPreset(name) {
+  const originSel = document.getElementById('plan-origin');
+  const targetSel = document.getElementById('plan-target');
+
+  // Simple mapping for now - just sets origin/target
+  // Complex multi-leg presets (vega, cassini) would need more UI support to show intermediate legs,
+  // but for now we'll just set the start/end points or defaults.
+
+  let origin = 'earth';
+  let target = 'mars';
+
+  switch (name) {
+    case 'earth-mars':
+      origin = 'earth'; target = 'mars';
+      break;
+    case 'vega':
+      origin = 'earth'; target = 'jupiter'; // Venus-Earth-Gravity-Assist
+      break;
+    case 'cassini':
+      origin = 'earth'; target = 'saturn';
+      break;
+    case 'messenger':
+      origin = 'earth'; target = 'mercury';
+      break;
+    case 'grand-tour':
+      origin = 'earth'; target = 'neptune';
+      break;
+  }
+
+  if (originSel) originSel.value = origin;
+  if (targetSel) targetSel.value = target;
+
+  console.log(`Loaded preset: ${name} (${origin} -> ${target})`);
+}
+
+// ── Mission History (anonymous, cookie-scoped) ────────────────────────────
+// Each entry re-renders through the same per-kind completion path a fresh
+// submission uses, so a reloaded mission looks identical to one just computed.
+
+const MISSION_KIND_LABELS = {
+  plan: 'Route search',
+  porkchop: 'Launch windows',
+  optimization_single: 'Optimized transfer',
+  optimization_multi: 'Multi-planet tour',
+};
+const MISSION_MODE_LABELS = { min_dv: 'Least fuel', min_tof: 'Arrive soonest' };
+
+// summary body IDs are NAIF numbers (possibly numeric strings); match against
+// the loaded ephemeris bodies the same way the rest of the UI does.
+function bodyDisplayName(id) {
+  const numeric = Number(id);
+  const body = bodies.find(b => b.naif_id === numeric || String(b.naif_id) === String(id));
+  return body ? body.name : `Body ${id}`;
+}
+
+function missionRouteText(job) {
+  const s = job.summary || {};
+  if (Array.isArray(s.body_sequence) && s.body_sequence.length > 1) {
+    return s.body_sequence.map(bodyDisplayName).join(' → ');
+  }
+  if (s.origin && s.target) return `${bodyDisplayName(s.origin)} → ${bodyDisplayName(s.target)}`;
+  return MISSION_KIND_LABELS[job.kind] || 'Mission';
+}
+
+function missionRelativeTime(iso) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return '';
+  const minutes = Math.round((Date.now() - then) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+function missionMetaText(job) {
+  const parts = [MISSION_KIND_LABELS[job.kind] || job.kind];
+  const mode = job.summary && job.summary.mode;
+  if (MISSION_MODE_LABELS[mode]) parts.push(MISSION_MODE_LABELS[mode]);
+  parts.push(missionRelativeTime(job.created_at));
+  return parts.filter(Boolean).join(' · ');
+}
+
+// Wait for the in-flight job, then render its result through the shared
+// per-kind path. Used both for queued/running history items and for a
+// submission whose history row appears before completion.
+async function resumeMissionJob(job) {
+  const result = await waitForJob(job.job_id);
+  renderMissionResult(job, result);
+  refreshMissionHistory();
+}
+
+function renderMissionResult(job, result) {
+  const summary = job.summary || {};
+  if (job.kind === 'plan') {
+    const resultsDiv = document.getElementById('plan-results');
+    resultsDiv.innerHTML = '';
+    if (!result.routes || result.routes.length === 0) {
+      resultsDiv.innerHTML = '<div class="result-box" style="text-align:center; color:var(--text-dim)">No routes found in this window.</div>';
+      return;
+    }
+    result.routes.forEach((r, i) => renderRouteCard(r, i, resultsDiv));
+    viewRoute(result.routes[0]);
+  } else if (job.kind === 'porkchop') {
+    document.getElementById('porkchop-overlay').classList.remove('hidden');
+    renderPorkchop(result);
+  } else if (job.kind === 'optimization_single') {
+    drawTransferArc(result.trajectory_points);
+    if (summary.origin && summary.target) {
+      showOrbitInsights({ ...result.optimization, status: 'complete', result });
+    } else {
+      showOrbitInsights({ ...result.optimization, status: 'complete' });
+    }
+  } else if (job.kind === 'optimization_multi') {
+    drawMultiLegArcs(result.legs);
+    showOrbitInsights({ ...result.optimization, status: 'complete' });
+  }
+  requestRender();
+}
+
+async function onMissionItemClick(job, btn) {
+  if (job.status === 'queued' || job.status === 'running') {
+    btn.disabled = true;
+    try {
+      await resumeMissionJob(job);
+    } catch (e) {
+      btn.disabled = false;
+      alert('Mission still running: ' + e.message);
+    }
+    return;
+  }
+  if (job.status === 'failed') {
+    alert('This mission failed. Run it again from the planner.');
+    return;
+  }
+  // Succeeded: fetch the stored result and re-render it.
+  btn.disabled = true;
+  try {
+    const result = await getJobResult(job.job_id);
+    renderMissionResult(job, result);
+  } catch (e) {
+    alert('Could not load this mission: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderMissionHistory(jobs) {
+  const list = document.getElementById('missions-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (!jobs || jobs.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'missions-empty';
+    li.textContent = 'No missions yet. Find a route and it will show up here.';
+    list.appendChild(li);
+    return;
+  }
+
+  for (const job of jobs) {
+    const li = document.createElement('li');
+    li.className = 'mission-item';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mission-btn';
+    btn.setAttribute('aria-label', `Open ${missionRouteText(job)} (${MISSION_KIND_LABELS[job.kind] || job.kind})`);
+
+    const title = document.createElement('span');
+    title.className = 'mission-title';
+    title.textContent = missionRouteText(job);
+
+    const meta = document.createElement('span');
+    meta.className = 'mission-meta';
+    meta.appendChild(document.createTextNode(missionMetaText(job)));
+
+    const status = document.createElement('span');
+    status.className = `mission-status ${job.status}`;
+    status.textContent = job.status === 'succeeded' ? 'Ready' : job.status === 'failed' ? 'Failed' : 'Running…';
+    meta.appendChild(document.createTextNode(' · '));
+    meta.appendChild(status);
+
+    btn.appendChild(title);
+    btn.appendChild(meta);
+    btn.addEventListener('click', () => onMissionItemClick(job, btn));
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+let missionHistoryPromise = null;
+async function refreshMissionHistory() {
+  // Mints the identity cookie on first call (before any submission) and keeps
+  // a single in-flight request so boot and a fast submission don't race.
+  missionHistoryPromise = (missionHistoryPromise || listJobs()).catch(e => {
+    console.error('Failed to load mission history:', e);
+    return [];
+  }).then(jobs => {
+    missionHistoryPromise = null;
+    renderMissionHistory(jobs);
+  });
+  return missionHistoryPromise;
+}
+
+async function onResetSession() {
+  const btn = document.getElementById('btn-reset-session');
+  btn.disabled = true;
+  try {
+    await resetSession();
+    renderMissionHistory([]);
+  } catch (e) {
+    alert('Could not start fresh: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Event Bindings ─────────────────────────────────────────────────────────
+function bindEvents() {
+  document.getElementById('btn-pause').addEventListener('click', togglePause);
+  document.getElementById('btn-reset-session').addEventListener('click', onResetSession);
+  document.getElementById('sim-speed').addEventListener('input', (e) => {
+    updateSimSpeed(parseInt(e.target.value));
+  });
+
+  document.getElementById('btn-close-pc').addEventListener('click', () => {
+    document.getElementById('porkchop-overlay').classList.add('hidden');
+  });
+
+  // Click outside overlay to close
+  document.getElementById('porkchop-overlay').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('porkchop-overlay')) {
+      document.getElementById('porkchop-overlay').classList.add('hidden');
+    }
+  });
+
+  // Planner Events
+  document.getElementById('btn-plan').addEventListener('click', planRoute);
+  document.getElementById('plan-any-date').addEventListener('change', (e) => {
+    const inputs = document.getElementById('plan-date-inputs');
+    if (e.target.checked) inputs.classList.add('hidden');
+    else inputs.classList.remove('hidden');
+  });
+
+  // Visualize Window button (added dynamically or if present)
+  const vizBtn = document.getElementById('btn-viz-window');
+  if (vizBtn) vizBtn.addEventListener('click', visualizeWindows);
+
+  // Multi-leg preset button
+  const mlBtn = document.getElementById('btn-ml-preset');
+  if (mlBtn) {
+    mlBtn.addEventListener('click', (e) => {
+      const menu = document.getElementById('ml-preset-menu');
+      if (menu.classList.contains('hidden')) {
+        const rect = e.target.getBoundingClientRect();
+        menu.classList.remove('hidden'); // unhide first so offsetWidth is measurable
+        menu.style.left = Math.max(8, Math.min(rect.left, innerWidth - menu.offsetWidth - 8)) + 'px';
+        menu.style.top = Math.max(8, Math.min(rect.bottom + 4, innerHeight - menu.offsetHeight - 8)) + 'px';
+      } else {
+        menu.classList.add('hidden');
+      }
+    });
+  }
+
+  // Preset items
+  document.querySelectorAll('.preset-item').forEach(item => {
+    item.addEventListener('click', () => {
+      loadPreset(item.dataset.preset);
+      document.getElementById('ml-preset-menu').classList.add('hidden');
+    });
+  });
+
+  // Close preset menu on click outside
+  document.addEventListener('click', (e) => {
+    const menu = document.getElementById('ml-preset-menu');
+    if (!menu.contains(e.target) && e.target.id !== 'btn-ml-preset') {
+      menu.classList.add('hidden');
+    }
+  });
+
+  document.getElementById('btn-fullscreen').addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+      // Enter Fullscreen
+      document.documentElement.requestFullscreen().catch(err => {
+        console.log(`Error attempting to enable fullscreen: ${err.message}`);
+      });
+    } else {
+      // Exit Fullscreen
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  });
+
+  const unlockBtn = document.getElementById('btn-unlock-cam');
+  if(unlockBtn) {
+    unlockBtn.addEventListener('click', unlockCamera);
+  }
+
+  window.addEventListener('mousedown', (event) => {
+    mouseDownPos.x = event.clientX;
+    mouseDownPos.y = event.clientY;
+    mouseDownTime = performance.now();
+    cancelFlyIfActive();
+  });
+
+  // A wheel zoom during a fly also cancels it
+  window.addEventListener('wheel', cancelFlyIfActive, { passive: true });
+
+  window.addEventListener('click', onMouseClick);
+  window.addEventListener('mousemove', onMouseMove);
+
+  // Initialize default multi-leg sequence
+  loadPreset('earth-mars');
+}
+
+// ── Planner Logic ──────────────────────────────────────────────────────────
+async function planRoute() {
+  const btn = document.getElementById('btn-plan');
+  const resultsDiv = document.getElementById('plan-results');
+  btn.classList.add('loading');
+  btn.setAttribute('aria-busy', 'true');
+  btn.disabled = true;
+  resultsDiv.innerHTML = '';
+
+  const origin = document.getElementById('plan-origin').value;
+  const target = document.getElementById('plan-target').value;
+  const mode = document.querySelector('input[name="plan-mode"]:checked').value;
+  const anyDate = document.getElementById('plan-any-date').checked;
+
+  const payload = {
+    origin, target, mode,
+    dep_start: anyDate ? null : document.getElementById('plan-start').value,
+    dep_end: anyDate ? null : document.getElementById('plan-end').value,
+  };
+
+  try {
+    const data = await calculateJob('plan', payload);
+    refreshMissionHistory();
+
+    if (data.routes.length === 0) {
+      resultsDiv.innerHTML = '<div class="result-box" style="text-align:center; color:var(--text-dim)">No routes found in this window.</div>';
+    } else {
+      data.routes.forEach((r, i) => renderRouteCard(r, i, resultsDiv));
+      // Auto-view first result
+      viewRoute(data.routes[0]);
+    }
+  } catch (e) {
+    resultsDiv.innerHTML = `<div class="result-box" style="color:var(--danger)">${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.classList.remove('loading');
+    btn.removeAttribute('aria-busy');
+    btn.disabled = false;
+  }
+}
+
+function renderRouteCard(route, index, container) {
+  const card = document.createElement('div');
+  card.className = `route-card ${index === 0 ? 'active' : ''}`;
+  card.dataset.index = index;
+
+  const ratingClass = route.rating || 'moderate';
+  const stars = ratingClass === 'excellent' ? '\u2605\u2605\u2605' :
+    ratingClass === 'good' ? '\u2605\u2605' :
+      ratingClass === 'bad' ? '' : '\u2605';
+
+  const m = massEstimate(route.total_dv_km_s);
+  const tofYears = (route.total_tof_days / 365.25).toFixed(1);
+  const via = route.type === 'multileg' ?
+    route.name.replace('Direct', '').replace(route.origin, '').replace(route.target, '').replace(/\b\w/g, l => l.toUpperCase()) :
+    'Direct';
+
+  card.innerHTML = `
+    <div class="rc-header">
+      <span class="rc-title">${escapeHtml(via)}</span>
+      <span class="rc-rating ${escapeHtml(ratingClass)}">${stars} ${escapeHtml(route.rating)}</span>
+    </div>
+    <div class="rc-stats">
+      <span>Fuel need (\u0394V) <span class="rc-val">${route.total_dv_km_s.toFixed(2)} km/s</span></span>
+      <span>Travel time <span class="rc-val">${route.total_tof_days.toFixed(0)} days</span> (${tofYears} yr)</span>
+    </div>
+    <div class="rc-dates">
+      Launch ${escapeHtml(route.departure_iso.split('T')[0])} &nbsp; Arrive ${escapeHtml(route.arrival_iso.split('T')[0])}
+    </div>
+    <div class="rc-actions">
+      <button class="rc-btn fly-btn">Fly mission</button>
+      <button class="rc-btn view-btn">Show path</button>
+      <button class="rc-btn optimize opt-btn">Optimize</button>
+    </div>
+  `;
+
+  card.querySelector('.fly-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    viewRoute(route); // Draw the line first
+    startMissionSimulation(route); // Then fly it
+  });
+
+  card.querySelector('.view-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.querySelectorAll('.route-card').forEach(c => c.classList.remove('active'));
+    card.classList.add('active');
+    viewRoute(route);
+  });
+
+  card.querySelector('.opt-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    optimizeRoute(route, card);
+  });
+
+  card.addEventListener('click', () => {
+    card.querySelector('.view-btn').click();
+  });
+
+  container.appendChild(card);
+}
+
+async function showOrbitInsights(msg, initialElements = null) {
+  let box = document.getElementById('orbit-insights-box');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'orbit-insights-box';
+    box.className = 'panel';
+    box.style.position = 'fixed';
+    box.style.bottom = '20px';
+    box.style.right = '320px';
+    box.style.width = '320px';
+    box.style.zIndex = '100';
+    box.style.background = 'rgba(14, 24, 40, 0.96)';
+    box.style.maxHeight = '500px';
+    box.style.overflowY = 'auto';
+    box.style.borderLeft = '4px solid var(--accent)';
+    document.body.appendChild(box);
+  }
+  
+  box.classList.remove('hidden');
+  
+  const optimizedEl = msg.orbit_elements || (msg.orbit_elements_list ? msg.orbit_elements_list[0] : null);
+  const initialEl = initialElements || optimizedEl; // Fallback if no initial
+  const insight = msg.insight || "Trajectory refined via NSGA-II.";
+  
+  let html = `
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); margin-bottom:8px; padding-bottom:4px">
+      <h2 style="margin:0; font-size:10px">Orbit Comparison</h2>
+      <button onclick="this.parentElement.parentElement.classList.add('hidden')" style="background:none; border:none; color:var(--text-dim); cursor:pointer">&times;</button>
+    </div>
+    <div style="font-size:11px; color:var(--accent); margin-bottom:12px; line-height:1.4">
+      ${escapeHtml(insight)}
+    </div>
+    <div id="orbit-insight-content">Loading orbit details...</div>
+  `;
+  box.innerHTML = html;
+
+  if (optimizedEl) {
+    try {
+      // Fetch details for initial
+      const resInit = await fetch(`${API}/orbit-info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          a_km: initialEl.a_km ?? initialEl.semi_major_axis_km,
+          e: initialEl.e ?? initialEl.eccentricity,
+          i_deg: initialEl.i_deg ?? initialEl.inclination_deg,
+          raan_deg: initialEl.raan_deg,
+          arg_p_deg: initialEl.arg_p_deg ?? initialEl.argp_deg
+        })
+      });
+      const initialInfo = await resInit.json();
+
+      // Fetch details for optimized
+      const resOpt = await fetch(`${API}/orbit-info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          a_km: optimizedEl.a_km ?? optimizedEl.semi_major_axis_km,
+          e: optimizedEl.e ?? optimizedEl.eccentricity,
+          i_deg: optimizedEl.i_deg ?? optimizedEl.inclination_deg,
+          raan_deg: optimizedEl.raan_deg,
+          arg_p_deg: optimizedEl.arg_p_deg ?? optimizedEl.argp_deg
+        })
+      });
+      const optimizedInfo = await resOpt.json();
+
+      const row = (label, oldVal, newVal, unit = '', color = '') => {
+        const diff = newVal - oldVal;
+        const pct = oldVal !== 0 ? (diff / Math.abs(oldVal) * 100) : 0;
+        const diffColor = diff < 0 ? 'var(--success)' : 'var(--warn)'; 
+        
+        return `
+          <div class="label" style="${color ? 'color:'+color : ''}">${label}</div>
+          <div class="val" style="display:flex; flex-direction:column; align-items:flex-end">
+            <span style="color:var(--text-dim); font-size:8px; text-decoration:line-through">${oldVal.toFixed(2)}${unit}</span>
+            <span>${newVal.toFixed(2)}${unit}</span>
+            ${initialElements ? `<span style="font-size:7px; color:${diffColor}">${diff > 0 ? '+' : ''}${pct.toFixed(1)}%</span>` : ''}
+          </div>
+        `;
+      };
+
+      const content = document.getElementById('orbit-insight-content');
+      let detailsHtml = `
+        <div class="info-grid" style="font-size:10px; grid-template-columns: 1fr 1fr; row-gap:12px">
+          ${row('SMA (a)', (initialEl.a_km ?? initialEl.semi_major_axis_km) / 1e6, (optimizedEl.a_km ?? optimizedEl.semi_major_axis_km) / 1e6, 'M km')}
+          ${row('Ecc (e)', initialEl.e ?? initialEl.eccentricity, optimizedEl.e ?? optimizedEl.eccentricity)}
+          ${row('Inc (i)', initialEl.i_deg ?? initialEl.inclination_deg, optimizedEl.i_deg ?? optimizedEl.inclination_deg, '°')}
+          ${row('Periapsis', initialInfo.periapsis_distance_km / 1e6, optimizedInfo.periapsis_distance_km / 1e6, 'M km', 'var(--success)')}
+          ${row('Apoapsis', initialInfo.apoapsis_distance_km / 1e6, optimizedInfo.apoapsis_distance_km / 1e6, 'M km', 'var(--warn)')}
+        </div>
+      `;
+
+      if (msg.orbit_elements_list && msg.orbit_elements_list.length > 1) {
+        detailsHtml += `<div style="font-size:9px; color:var(--text-dim); margin-top:8px">+ ${msg.orbit_elements_list.length - 1} more legs computed</div>`;
+      }
+      content.innerHTML = detailsHtml;
+
+      // Visuals: Draw Full Orbits
+      clearFullOrbits();
+      if (initialElements && initialInfo.full_orbit_points_scene) {
+        drawFullOrbit(initialInfo.full_orbit_points_scene, 0x555555, true); // Dashed grey for old
+      }
+      if (optimizedInfo.full_orbit_points_scene) {
+        drawFullOrbit(optimizedInfo.full_orbit_points_scene, 0x8cb8e8, false); // Solid accent for new
+      }
+
+      // Visuals: Apsis Markers
+      clearMarkers();
+      if (optimizedInfo.periapsis_point_scene) {
+        const p = optimizedInfo.periapsis_point_scene;
+        addMarker({x: p[0], y: p[1], z: p[2]}, 0x6cc18a, 1.5); // Periapsis
+      }
+      if (optimizedInfo.apoapsis_point_scene) {
+        const a = optimizedInfo.apoapsis_point_scene;
+        addMarker({x: a[0], y: a[1], z: a[2]}, 0xe9c46a, 1.5); // Apoapsis
+      }
+
+    } catch (e) {
+      document.getElementById('orbit-insight-content').innerHTML = `<div style="color:var(--danger)">Error loading details</div>`;
+      console.error("Failed to fetch orbit info:", e);
+    }
+  }
+}
+
+let fullOrbitLines = [];
+function drawFullOrbit(points, color, dashed = false) {
+  const threePts = points.map(p => new THREE.Vector3(p[0], p[2], -p[1]));
+  // Close the loop for elliptic
+  if (points.length > 2) threePts.push(threePts[0]);
+
+  const geo = new THREE.BufferGeometry().setFromPoints(threePts);
+  let mat;
+  if (dashed) {
+    mat = new THREE.LineDashedMaterial({ color, dashSize: 10, gapSize: 5, transparent: true, opacity: 0.5 });
+  } else {
+    mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.8 });
+  }
+  
+  const line = new THREE.Line(geo, mat);
+  if (dashed) line.computeLineDistances();
+  scene.add(line);
+  fullOrbitLines.push(line);
+  requestRender();
+}
+
+function clearFullOrbits() {
+  fullOrbitLines.forEach(l => {
+    scene.remove(l);
+    l.geometry.dispose();
+    l.material.dispose();
+  });
+  fullOrbitLines = [];
+  requestRender();
+}
+
+function viewRoute(route) {
+  // Clear scene
+  if (transferLine) {
+    scene.remove(transferLine);
+    transferLine = null;
+  }
+  clearMultiLegArcs();
+  clearMarkers();
+  requestRender();
+
+  // Draw based on type
+  if (route.type === 'direct') {
+    drawTransferArc(route.trajectory_points);
+  } else {
+    // For multileg, we need to construct 'legs' structure if not present or just draw points
+    // The backend returns 'legs' with trajectory_points inside
+    if (route.legs) {
+      drawMultiLegArcs(route.legs);
+    }
+  }
+}
+
+function optimizeRoute(route, activeCard) {
+  if (!activeCard) return;
+
+  const actionsDiv = activeCard.querySelector('.rc-actions');
+  actionsDiv.innerHTML = `<div class="progress-bar" style="width:100%; margin:4px 0"><div class="fill" style="width:0%"></div></div><div class="rc-status" style="font-size:9px;color:var(--text-dim)">Starting...</div>`;
+
+  let initialElements = null;
+
+  const onProgress = (msg) => {
+    const bar = actionsDiv.querySelector('.fill');
+    const stat = actionsDiv.querySelector('.rc-status');
+
+    // Store first feasible result as "initial" baseline for comparison
+    if (!initialElements && (msg.orbit_elements || msg.orbit_elements_list)) {
+      initialElements = msg.orbit_elements || msg.orbit_elements_list[0];
+    }
+
+    if (bar && msg.max_iterations) {
+      const pct = (msg.iteration / msg.max_iterations) * 100;
+      bar.style.width = pct + '%';
+    }
+    if (stat) {
+      if (msg.status === 'running') {
+        const insightText = msg.insight ? `<div style="margin-top:2px; font-style:italic; color:var(--accent); font-size:8px">${escapeHtml(msg.insight)}</div>` : '';
+        stat.innerHTML = `Iter ${escapeHtml(msg.iteration)}: ${msg.best_dv_total ? msg.best_dv_total.toFixed(2) : '...'} km/s${insightText}`;
+      } else {
+        stat.textContent = msg.status;
+      }
+    }
+  };
+
+  const onComplete = (msg) => {
+    if (msg.status === 'complete') {
+      if (msg.result) {
+        Object.assign(route, msg.result);
+        route.total_dv_km_s = msg.result.total_dv_km_s ?? msg.result.dv_total_km_s;
+        route.total_tof_days = msg.result.total_tof_days ?? msg.result.tof_days;
+        activeCard.querySelector('.rc-dates').textContent = `Dep: ${route.departure_iso.split('T')[0]} Arr: ${route.arrival_iso.split('T')[0]}`;
+      }
+      const stat = actionsDiv.querySelector('.rc-status');
+      stat.textContent = `Done. Best: ${msg.best_dv_total.toFixed(2)} km/s`;
+
+      // Update card stats
+      const valEls = activeCard.querySelectorAll('.rc-val');
+      if (valEls.length >= 2) {
+        valEls[0].textContent = msg.best_dv_total.toFixed(2) + ' km/s';
+        let tof = msg.best_total_tof_days || msg.best_tof_days;
+        if (tof) valEls[1].textContent = tof.toFixed(0) + 'd';
+      }
+
+      if (msg.orbit_elements || msg.orbit_elements_list) {
+        showOrbitInsights(msg, initialElements);
+      }
+    }
+  };
+
+  if (route.type === 'direct') {
+    // Set window +/- 6 months around best date
+    const d = new Date(route.departure_iso);
+    const start = new Date(d); start.setMonth(d.getMonth() - 6);
+    const end = new Date(d); end.setMonth(d.getMonth() + 6);
+    const clamp = (dt) => dt.toISOString().split('T')[0];
+    
+    const selectedMode = document.querySelector('input[name="plan-mode"]:checked').value;
+
+    runOptimizer({
+      origin: route.origin,
+      target: route.target,
+      dep_start: clamp(start),
+      dep_end: clamp(end),
+      mode: selectedMode,
+    }, onProgress, onComplete);
+
+  } else {
+    // Multi-leg
+    // Departure window +/- 90 days
+    const d = new Date(route.departure_iso);
+    const start = new Date(d); start.setDate(d.getDate() - 90);
+    const end = new Date(d); end.setDate(d.getDate() + 90);
+    const clamp = (dt) => dt.toISOString().split('T')[0];
+
+    // Build bounds from legs in result
+    let legBounds = [];
+    if (route.legs) {
+      legBounds = route.legs.map(l => [l.tof_days * 0.5, l.tof_days * 1.5]);
+    } else {
+      console.error("Cannot optimize multi-leg without leg data");
+      return;
+    }
+    
+    const selectedMode = document.querySelector('input[name="plan-mode"]:checked').value;
+
+    runMultiLegOptimizer({
+      body_sequence: route.body_sequence,
+      dep_start: clamp(start),
+      dep_end: clamp(end),
+      leg_tof_bounds: legBounds,
+      mode: selectedMode,
+    }, onProgress, onComplete);
+  }
+}
+
+function createSpacecraftMesh() {
+  const group = new THREE.Group();
+
+  // Body (Cylinder)
+  const bodyGeo = new THREE.CylinderGeometry(0.5, 1.2, 4, 12);
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.4, metalness: 0.8 });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.rotation.x = Math.PI / 2; // Orient along Z axis initially
+  group.add(body);
+
+  // Engine / Base (Darker)
+  const engineGeo = new THREE.CylinderGeometry(1.2, 0.8, 1, 12);
+  const engineMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+  const engine = new THREE.Mesh(engineGeo, engineMat);
+  engine.rotation.x = Math.PI / 2;
+  engine.position.z = -2.5;
+  group.add(engine);
+
+  // Engine Glow (Sprite)
+  const spriteMat = new THREE.SpriteMaterial({ 
+    map: createGlowTexture(), 
+    color: 0x8cb8e8, 
+    blending: THREE.AdditiveBlending 
+  });
+  const glow = new THREE.Sprite(spriteMat);
+  glow.scale.set(4, 4, 1);
+  glow.position.z = -3.5;
+  group.add(glow);
+
+  group.scale.set(3, 3, 3); 
+
+  return group;
+}
+
+function updateEngineTrail(delta) {
+  if (!activeMission || !activeMission.mesh) return;
+
+  // 1. Spawn a new particle at ship position
+  // Throttle: only spawn if we have pool space
+  if (activeParticles.length < maxParticles) {
+    let p = particlePool.pop();
+    if (!p) {
+        // Create new if pool empty
+        p = new THREE.Mesh(particleGeometry, particleMaterial.clone());
+        scene.add(p);
+    }
+    
+    // Reset state
+    p.material.opacity = 0.8;
+    p.scale.set(1,1,1);
+    
+    // Position at engine nozzle (local Z -3.5 relative to ship)
+    const enginePos = new THREE.Vector3(0, 0, -3.0); 
+    enginePos.applyMatrix4(activeMission.mesh.matrixWorld); // Convert to world space
+    
+    // Add some "jitter" for realism
+    enginePos.x += (Math.random() - 0.5) * 0.5;
+    enginePos.y += (Math.random() - 0.5) * 0.5;
+    enginePos.z += (Math.random() - 0.5) * 0.5;
+
+    p.position.copy(enginePos);
+    p.visible = true;
+
+    activeParticles.push({ mesh: p, life: 1.0 }); // Life 1.0 -> 0.0
+  }
+  // 2. Update existing particles
+  for (let i = activeParticles.length - 1; i >= 0; i--) {
+      const p = activeParticles[i];
+      p.life -= delta * 2.0; // Fade speed
+
+      if (p.life <= 0) {
+          // Dead -> Return to pool
+          p.mesh.visible = false;
+          activeParticles.splice(i, 1);
+          particlePool.push(p.mesh);
+      } else {
+          // Animate
+          p.mesh.material.opacity = p.life;
+          const s = 1.0 - (p.life * 0.5); // Grow slightly as it dissipates
+          p.mesh.scale.setScalar(s * 5.0); // Size multiplier
+      }
+  }
+}
+
+function startMissionSimulation(route) {
+  // 1. Cleanup old mission
+  if (activeMission) {
+    scene.remove(activeMission.mesh);
+    activeMission = null;
+    requestRender();
+  }
+
+    // 1. Remove visual meshes
+  Object.keys(planetTrails).forEach(id => {
+    removePlanetTrail(id); // Helper function you already have
+  });
+
+  // 2. Clear data history
+  planetTrailHist = {};   // Reset position history
+  lastTrailSimTime = {};  // Reset timer so next frame forces a new point
+  
+  // 2. Prepare Data
+  const startTime = new Date(route.departure_iso).getTime();
+  const endTime = new Date(route.arrival_iso).getTime();
+  const durationMs = endTime - startTime;
+
+  // Transform backend points {x,y,z} to Scene Vectors (x, z, -y)
+  // Determine if it's a direct route or multi-leg
+  let rawPoints = [];
+  if (route.type === 'direct') {
+    rawPoints = route.trajectory_points;
+  } else if (route.legs) {
+    // Flatten all legs into one path
+    route.legs.forEach(leg => rawPoints.push(...leg.trajectory_points));
+  }
+  
+  // Convert to ThreeJS Vectors
+  const pathPoints = rawPoints.map(p => new THREE.Vector3(p.x, p.z, -p.y));
+
+  // 3. Setup Scene
+  spacecraftMesh = createSpacecraftMesh();
+  scene.add(spacecraftMesh);
+  requestRender();
+
+  // 4. Update Global State
+  activeMission = {
+    mesh: spacecraftMesh,
+    pathPoints: pathPoints,
+    startTime: startTime,
+    durationMs: durationMs,
+    times: rawPoints.map(pointToUnixMs)
+  };
+
+  // 5. Jump Time & Camera
+  focusedBodyId = null; 
+  simPaused = false;
+  isSimulationMaster = true; // TAKE CONTROL
+  
+  // Set simulation date slightly before launch
+  currentDate = new Date(startTime);
+  
+  // Snap camera near launch point (first point in path)
+  const startPos = pathPoints[0];
+  const offset = new THREE.Vector3(20, 10, 20); // Close up view
+  
+  camera.position.copy(startPos).add(offset);
+  controls.target.copy(startPos);
+  
+  // Set speed to traverse mission in ~30 seconds real-time
+  // durationMs (mission time) / 30000 (real ms) = speed factor
+  // But strictly speaking, your app uses "days per second"
+  const missionDays = durationMs / (1000 * 60 * 60 * 24);
+  const idealRealTimeSeconds = 30; // Animation length
+  simSpeed = missionDays / idealRealTimeSeconds; 
+  document.getElementById('sim-speed-val').textContent = simSpeed.toFixed(1);
+  
+  setStatus('ok', 'Mission Started: ' + route.origin + ' to ' + route.target);
+}
+
+async function visualizeWindows() {
+  const origin = document.getElementById('plan-origin').value;
+  const target = document.getElementById('plan-target').value;
+  const anyDate = document.getElementById('plan-any-date').checked;
+  let start = '2028-01-01', end = '2030-01-01'; // Defaults
+
+  if (!anyDate) {
+    start = document.getElementById('plan-start').value;
+    end = document.getElementById('plan-end').value;
+  } else {
+    // Default 2 year window from now? Or next synodic window?
+    // Just pick 2028-2030 for now as a demo window, or use current planner logic.
+    // Better: Use the date range from the date inputs if set, else defaults.
+    // If "Any date" is checked, inputs are hidden but have values.
+    // We'll just use the hidden values if they are reasonable, or force a 4-year window.
+    start = '2028-01-01';
+    end = '2032-01-01';
+  }
+
+  await generatePorkchop({
+    origin, target, dep_start: start, dep_end: end
+  });
+}
+
+// ── Multi-Leg Trajectory ───────────────────────────────────────────────────
+// (Manual functions removed, kept only formatting helpers if needed)
+
+// ── Multi-leg Optimizer ───────────────────────────────────────────────────
+// (Merged into runMultiLegOptimizer above)
+
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  timer.update();
+  const delta = timer.getDelta();
+  const nowMs = performance.now();
+
+  // ── TIME MANAGEMENT ──────────────────────────────────────────
+  if (!simPaused) {
+
+    const msPerSecond = simSpeed * 86400000; 
+    const stepMs = msPerSecond * delta;
+    
+    if (isSimulationMaster) {
+       const newTime = currentDate.getTime() + stepMs;
+       currentDate = new Date(newTime);
+    }
+    
+    // Update Text (only when the date string actually changes)
+    const dateStr = currentDate.toISOString().split('T')[0];
+    if (dateStr !== lastStatusDateStr) {
+      lastStatusDateStr = dateStr;
+      statusTextEl.textContent = dateStr;
+    }
+  }
+
+  // ── SYNC BACKEND (If Frontend is Master) ─────────────────────
+  if (isSimulationMaster && !document.hidden && ephemerisWs && ephemerisWs.readyState === WebSocket.OPEN) {
+    const now = performance.now();
+    if (now - lastWsRequestTime > 50) { // Approx 20 FPS updates
+        lastWsRequestTime = now;
+        
+        const jd = (currentDate.getTime() / 86400000) + 2440587.5;
+        
+        ephemerisWs.send(JSON.stringify({
+          start_iso: currentDate.toISOString(),
+          speed: simSpeed, // Keep speed synced
+          scene_units: true
+        }));
+    }
+  }
+
+  // ── SPACECRAFT LOGIC (New!) ─────────────────────────────
+  if (activeMission) {
+
+    updateEngineTrail(delta);
+
+    const now = currentDate.getTime();
+    const t = (now - activeMission.startTime) / activeMission.durationMs;
+
+    // Safety Check: Mission over?
+    if (t >= 1.0) {
+      // Mission Complete
+      // console.log("Arrival!");
+    } else if (t >= 0) {
+      // Interpolate Position
+      const timed = activeMission.times.every(Number.isFinite);
+      let i, fraction;
+      if (timed) {
+        i = Math.max(0, activeMission.times.findIndex(time => time > now) - 1);
+        const next = Math.min(i + 1, activeMission.times.length - 1);
+        fraction = Math.max(0, Math.min(1, (now - activeMission.times[i]) / Math.max(1, activeMission.times[next] - activeMission.times[i])));
+      } else {
+        const floatIndex = t * (activeMission.pathPoints.length - 1);
+        i = Math.floor(floatIndex);
+        fraction = floatIndex - i;
+      }
+
+      const p1 = activeMission.pathPoints[i];
+      const p2 = activeMission.pathPoints[Math.min(i + 1, activeMission.pathPoints.length - 1)];
+
+      if (p1 && p2) {
+        // Calculate Position (scratch vector — no per-frame allocation)
+        const currentPos = scratchA.lerpVectors(p1, p2, fraction);
+        activeMission.mesh.position.copy(currentPos);
+
+        // Calculate Orientation (Look at next point)
+        activeMission.mesh.lookAt(p2);
+
+        // LOCK CAMERA
+        // We calculate movement delta to keep smooth orbit controls
+        const posDelta = scratchB.subVectors(currentPos, previousBodyPosition);
+
+        // If this is the very first frame of mission, don't jump camera wildy
+        if (previousBodyPosition.lengthSq() > 0) {
+           camera.position.add(posDelta);
+           controls.target.copy(currentPos);
+        }
+        previousBodyPosition.copy(currentPos);
+      }
+    }
+  }
+
+    // ── ROTATION LOGIC ───────────────────────────────────────────
+  for (const [id, rootGroup] of Object.entries(bodyMeshes)) {
+    // 1. Calc Speed
+    const periodDays = (typeof ROTATION_PERIODS !== 'undefined' && ROTATION_PERIODS[id]) || 1.0;
+    const visualSpeedFactor = 1.0;
+    // Paused = still. An idle spin would only show at the ~1 Hz safety render,
+    // stepping textures once a second (the "glittering" Sun).
+    const speed = simPaused ? 0 : Math.min(Math.abs(simSpeed), 20);
+    const rotationStep = (delta * speed * visualSpeedFactor) / Math.abs(periodDays);
+    // 2. Rotate the SPIN MESH (The Sphere inside the Tilt Group)
+    if (rootGroup.userData.spinMesh) {
+        const planet = rootGroup.userData.spinMesh;
+        
+        // This rotates the planet around its OWN local Y axis (which is tilted 26 deg).
+        // Because it's inside a tilted group, it spins perfectly "on axis".
+        planet.rotation.y += rotationStep;
+
+        // 3. Clouds (Child of SpinMesh)
+        // Clouds rotate slightly differently relative to the surface
+        if (planet.userData.cloudMesh) {
+             planet.userData.cloudMesh.rotation.y += (rotationStep * 0.15); // Extra speed
+        }
+    } 
+  }
+
+  // ── CAMERA LOGIC ────────────────────────────────────────────────
+  if (focusedBodyId && bodyMeshes[focusedBodyId]) {
+    const mesh = bodyMeshes[focusedBodyId];
+    // Stable snapshot for this frame (scratch vector — no per-frame allocation)
+    const currentBodyPosition = scratchA.copy(mesh.position);
+
+    // 1. PHYSICAL TRACKING (The Fix for SimSpeed > 1)
+    // Calculate exactly how much the planet moved this frame
+    const deltaMovement = scratchB.subVectors(currentBodyPosition, previousBodyPosition);
+
+    // Apply this movement to the camera rig immediately.
+    // This ensures the camera falls "in sync" with the planet's speed,
+    // so it doesn't matter if simSpeed is 1 or 100.
+    camera.position.add(deltaMovement);
+    controls.target.add(deltaMovement);
+
+    // ── MODE A: FLYING ANIMATION (Transition) ──
+    if (isFlyingToTarget) {
+
+      const visualSizeFactor = 10;
+      const rawRadius = (DISPLAY_RADIUS[focusedBodyId] || 1.0);
+      const planetRadius = rawRadius * visualSizeFactor;
+
+      // 1. DISTANCE CALCULATION
+      // larger buffer for Sun (ID 10) so we see the whole system
+      const buffer = (focusedBodyId === 10) ? 300.0 : 50.0;
+      const idealDist = (planetRadius * 4.0) + buffer;
+
+      // 2. TARGET POSITION — approach along the fly's initial direction,
+      // re-anchored to the body's live position (the body keeps moving).
+      const currentDir = scratchB.subVectors(flyFromCameraPos, flyFromTarget).normalize();
+
+      // Safety check
+      if (currentDir.lengthSq() === 0) currentDir.set(0, 0, 1);
+
+      const targetPos = currentBodyPosition.clone().add(currentDir.multiplyScalar(idealDist));
+
+      // 3. TIME-BASED MOVE (ease-in-out cubic over ~1.2 s, frame-rate independent)
+      const p = flyProgress(flyStartMs, nowMs, reducedMotion.matches);
+
+      camera.position.lerpVectors(flyFromCameraPos, targetPos, p);
+      controls.target.lerpVectors(flyFromTarget, currentBodyPosition, p);
+
+      // D. Check Arrival
+      if (p >= 1) {
+        isFlyingToTarget = false;
+        controls.enableDamping = true; // Re-enable manual rotation
+      }
+    }
+
+    // 3. Update history for the next frame
+    previousBodyPosition.copy(currentBodyPosition);
+  }
+
+  // ── HOVER RAYCAST (throttled to once per frame, only on pointer move) ──
+  updateHoverRaycast();
+
+  // Update controls LAST (returns true while damping is still settling)
+  const controlsMoved = controls.update();
+
+  // ── RENDER ON DEMAND ───────────────────────────────────────────
+  // Continuous sources: time advancing (bodies spin, mission flies),
+  // a fly-to, or damping settling. Everything else goes through
+  // requestRender(); a 1 s safety render covers forgotten mutations.
+  const wantRender = !simPaused || isFlyingToTarget || controlsMoved
+    || needsRender || (nowMs - lastSafetyRenderMs >= 1000);
+  if (wantRender && shouldRender(nowMs)) {
+    needsRender = false;
+    lastSafetyRenderMs = nowMs;
+    renderer.render(scene, camera);
+    labelRenderer.render(scene, camera);
+  }
+}
+
+// A pointerdown or wheel during a fly cancels it and hands control back.
+function cancelFlyIfActive() {
+  if (!isFlyingToTarget) return;
+  isFlyingToTarget = false;
+  controls.enableDamping = true;
+  requestRender();
+}
+
+
+// ── Hot-loop scratch (no per-frame allocation in animate()) ────────────────
+const scratchA = new THREE.Vector3();
+const scratchB = new THREE.Vector3();
+const statusTextEl = document.getElementById('status-text');
+let lastStatusDateStr = '';
+
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+init();
+
+
+

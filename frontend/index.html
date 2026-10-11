@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TARS Trajectory Designer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@500;600;700&family=Source+Sans+3:wght@400;500;600&display=swap" />
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+
+<body>
+  <!-- Loading Screen -->
+  <div id="loading-screen" class="loading-overlay">
+    <div class="loader-content">
+      <div class="spinner"></div>
+      <h1>TARS</h1>
+      <p id="loading-text">Getting ready for launch…</p>
+    </div>
+  </div>
+
+  <!-- 3D viewport -->
+  <div id="viewport"></div>
+
+  <!-- Left Sidebar for Planet Info -->
+  <div id="planet-info-panel" class="left-panel hidden">
+    <h2 id="pi-name">Planet Name</h2>
+    <div class="planet-hero">
+      <div id="pi-color-swatch"></div>
+    </div>
+    <div class="info-grid">
+      <div class="label">Type</div>     <div id="pi-type" class="val">Planet</div>
+      <div class="label">Gravity</div>  <div id="pi-gravity" class="val">1.0 g</div>
+      <div class="label">Moons</div>    <div id="pi-moons" class="val">0</div>
+      <div class="label">Atmosphere</div> <div id="pi-atm" class="val">N2</div>
+      <div class="label">Radius</div>   <div id="pi-radius" class="val">0 km</div>
+      <div class="label">Day</div>      <div id="pi-day" class="val">0 h</div>
+      <div class="label">Year</div>     <div id="pi-year" class="val">0 d</div>
+      <div class="label">Temperature</div>     <div id="pi-temp" class="val">0°C</div>
+    </div>
+    <div class="desc-box">
+      <p id="pi-desc">Description...</p>
+    </div>
+    <button id="btn-unlock-cam" class="secondary">Free the camera</button>
+  </div>
+
+  <!-- Top bar -->
+  <header id="topbar">
+    <div class="logo">TARS<small>Trajectory designer</small></div>
+    <div class="status">
+      <span id="status-dot" class="dot"></span>
+      <span id="status-text">Connecting...</span>
+    </div>
+    <div class="search-island">
+      <svg class="search-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input type="text" id="search-input" placeholder="Find a planet or moon" autocomplete="off" spellcheck="false"
+        role="combobox" aria-label="Find a planet or moon" aria-autocomplete="list" aria-expanded="false" aria-controls="search-results">
+      <ul id="search-results" class="search-results" role="listbox" aria-label="Planets and moons" hidden></ul>
+    </div>
+    <div class="sim-controls">
+      <label>Speed
+        <input type="range" id="sim-speed" min="0" max="100" value="10" />
+        <span id="sim-speed-val">10</span> d/s
+      </label>
+      <button id="btn-pause" title="Pause simulation" aria-label="Pause simulation" aria-pressed="false">
+        <span class="state-icon icon-play" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="m8 5 11 7-11 7Z"/></svg></span>
+        <span class="state-icon icon-pause" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <!-- Mission Planner (New Simple Flow) -->
+    <section class="panel" id="panel-planner">
+      <h2>Where do you want to go?</h2>
+      <p class="lede">Pick two worlds and we’ll find routes between them.</p>
+      <div class="field-row">
+        <div class="field">
+          <label for="plan-origin">From</label>
+          <select id="plan-origin"></select>
+        </div>
+        <div class="field">
+          <label for="plan-target">To</label>
+          <select id="plan-target"></select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>What matters most?</label>
+        <div class="toggle-row">
+          <input type="radio" name="plan-mode" id="mode-fuel" value="min_dv" checked>
+          <label for="mode-fuel" title="Use the least fuel">Least fuel</label>
+          <input type="radio" name="plan-mode" id="mode-fast" value="min_tof">
+          <label for="mode-fast" title="Arrive soonest">Arrive soonest</label>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>
+          <input type="checkbox" id="plan-any-date" checked>
+          Any launch date
+        </label>
+      </div>
+
+      <div id="plan-date-inputs" class="field-row hidden">
+        <div class="field">
+          <label for="plan-start">Earliest launch</label>
+          <input type="date" id="plan-start" value="2028-01-01">
+        </div>
+        <div class="field">
+          <label for="plan-end">Latest launch</label>
+          <input type="date" id="plan-end" value="2035-01-01">
+        </div>
+      </div>
+
+      <button id="btn-viz-window" class="secondary"
+        title="See a heat map of launch dates">See launch windows</button>
+
+      <button id="btn-plan" class="primary"><svg class="button-icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="18" r="2"/><circle cx="19" cy="6" r="2"/><path d="M7 18h6a4 4 0 0 0 0-8H9a4 4 0 0 1 0-8h8"/></svg>Find routes</button>
+
+      <button id="btn-ml-preset" class="secondary" title="Famous multi-planet missions">Try a famous mission</button>
+
+      <div id="plan-results"></div>
+    </section>
+
+    <!-- Anonymous mission history (cookie-scoped) -->
+    <section class="panel" id="panel-missions" aria-labelledby="missions-title">
+      <h2 id="missions-title">Your missions</h2>
+      <ul id="missions-list" class="missions-list"></ul>
+      <button id="btn-reset-session" type="button" class="text-btn">Start fresh</button>
+      <p class="missions-notice">One cookie keeps an anonymous ID so your missions are here next time. No tracking.</p>
+    </section>
+  </aside>
+
+  <!-- Pork-chop overlay -->
+  <div id="porkchop-overlay" class="overlay hidden">
+    <div class="overlay-content">
+      <div class="overlay-header">
+        <h2>Launch windows</h2>
+        <button id="btn-close-pc" class="close-btn" aria-label="Close plot">&times;</button>
+      </div>
+      <div id="porkchop-container">
+        <canvas id="porkchop-canvas"></canvas>
+        <div id="porkchop-tooltip" class="tooltip hidden"></div>
+      </div>
+      <div id="porkchop-legend"></div>
+    </div>
+  </div>
+
+  <!-- Info tooltip for hovering bodies -->
+  <div id="body-tooltip" class="tooltip hidden"></div>
+
+  <!-- Multi-leg preset menu -->
+  <div id="ml-preset-menu" class="preset-menu hidden">
+    <button type="button" class="preset-item static" data-preset="vega">
+      <strong>VEGA</strong> Earth &rarr; Venus &rarr; Earth &rarr; Jupiter
+    </button>
+    <button type="button" class="preset-item static" data-preset="cassini">
+      <strong>Cassini</strong> Earth &rarr; Venus &rarr; Venus &rarr; Earth &rarr; Jupiter &rarr; Saturn
+    </button>
+    <button type="button" class="preset-item static" data-preset="messenger">
+      <strong>MESSENGER</strong> Earth &rarr; Venus &rarr; Venus &rarr; Mercury
+    </button>
+    <button type="button" class="preset-item static" data-preset="earth-mars">
+      <strong>Direct</strong> Earth &rarr; Mars
+    </button>
+    <button type="button" class="preset-item static" data-preset="grand-tour">
+      <strong>Grand Tour</strong> Earth &rarr; Jupiter &rarr; Saturn &rarr; Uranus &rarr; Neptune
+    </button>
+  </div>
+
+  <!-- Scripts -->
+  <script type="module" src="./js/app.js"></script>
+    <!-- Floating View Controls -->
+  <div class="view-controls">
+    <button id="btn-fullscreen" class="control-btn" title="Toggle Fullscreen" aria-label="Toggle fullscreen">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg>
+    </button>
+
+  </div>
+</body>
+
+</html>

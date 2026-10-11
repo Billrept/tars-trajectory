@@ -1,0 +1,15 @@
+{
+  "source": "NASA JPL Horizons",
+  "retrieved_date": "2026-10-11",
+  "frame": "ECLIPJ2000",
+  "center": "500@10",
+  "units": "KM-S",
+  "time_scale": "TDB",
+  "start": "2026-01-01",
+  "stop": "2030-01-01",
+  "step_days": 1,
+  "body_ids": [
+    399,
+    499
+  ]
+}

@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Tools / caches
+.playwright-mcp/
+.understand-anything/
+.pytest_cache/
+node_modules/
+*.log
+
+# Frontend build output
+frontend/dist/
+
+# Environment
+.env
+.env.*
+!.env.example
+artifacts/
+.local/
+
+# Ephemeris cache
+data/cache/
+
+# Protobuf generated
+src/serialization/proto/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Redis
+dump.rdb
+
+# Numba cache
+__numba_cache__/
+
+# AI-generated working docs (plans, specs, execution ledgers, baselines): local only.
+# Keep only the architecture image the README embeds.
+docs/*
+!docs/architecture/
+docs/architecture/*
+!docs/architecture/system-architecture.svg
+
+# AI assistant guidance (Claude Code): local only
+CLAUDE.md

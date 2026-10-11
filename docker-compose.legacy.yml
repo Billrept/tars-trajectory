@@ -1,0 +1,68 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - EPHEMERIS_CACHE_DIR=/app/data/cache
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      - ephemeris_cache:/app/data/cache
+      - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build: .
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - EPHEMERIS_CACHE_DIR=/app/data/cache
+    volumes:
+      - ephemeris_cache:/app/data/cache
+      - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: arq workers.worker.WorkerSettings
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://localhost:3000/healthz'); if (!r.ok) process.exit(1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      - api
+
+volumes:
+  redis_data:
+  ephemeris_cache:

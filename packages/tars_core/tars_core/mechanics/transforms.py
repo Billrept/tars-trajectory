@@ -1,0 +1,139 @@
+"""Coordinate transforms and unit conversions for the 3D scene.
+
+Handles:
+- Real units (km) <-> Scene units (1 AU = configurable scale)
+- Julian Date <-> ISO datetime conversion
+- Ecliptic <-> Equatorial frame rotation
+- Adaptive trajectory sampling for keyframe generation
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime, timezone
+from tars_core.time import iso_to_jd,jd_to_iso,datetime_to_jd,jd_to_datetime
+
+import numpy as np
+
+from tars_core.bodies import AU_KM
+
+# --------------------------------------------------------------------------- #
+#  Unit conversions
+# --------------------------------------------------------------------------- #
+SCENE_SCALE = 1000.0  # 1 AU = this many scene units
+
+
+def km_to_scene(pos_km: np.ndarray) -> np.ndarray:
+    """Convert position from km to scene units (scaled by AU)."""
+    return pos_km * (SCENE_SCALE / AU_KM)
+
+
+def km_to_au(pos_km: np.ndarray) -> np.ndarray:
+    """Convert position from km to AU."""
+    return pos_km / AU_KM
+
+
+# --------------------------------------------------------------------------- #
+#  Epoch conversions  (Julian Date <-> Python datetime)
+# --------------------------------------------------------------------------- #
+_J2000_EPOCH = datetime(2000, 1, 1, 12, 0, 0)  # JD 2451545.0
+_JD_J2000 = 2451545.0
+
+
+
+
+
+
+
+
+
+
+# --------------------------------------------------------------------------- #
+#  Frame rotations
+# --------------------------------------------------------------------------- #
+# Obliquity of the ecliptic at J2000 (23.4393 degrees)
+_OBLIQUITY_RAD = math.radians(23.4392911)
+_COS_OBL = math.cos(_OBLIQUITY_RAD)
+_SIN_OBL = math.sin(_OBLIQUITY_RAD)
+
+# Rotation matrix: ecliptic -> equatorial
+_R_ECL_TO_EQ = np.array([
+    [1.0, 0.0, 0.0],
+    [0.0, _COS_OBL, -_SIN_OBL],
+    [0.0, _SIN_OBL, _COS_OBL],
+], dtype=np.float64)
+
+# Inverse: equatorial -> ecliptic
+_R_EQ_TO_ECL = _R_ECL_TO_EQ.T
+
+
+# --------------------------------------------------------------------------- #
+#  Adaptive trajectory sampling
+# --------------------------------------------------------------------------- #
+def sample_trajectory_adaptive(
+    positions: np.ndarray,
+    epochs: np.ndarray,
+    angle_threshold_deg: float = 0.05,
+    min_points: int = 50,
+    max_points: int = 1000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Adaptively sample a trajectory, keeping points where curvature is high.
+
+    This reduces the number of points sent to the frontend while preserving
+    visual fidelity at maneuvers and curved sections.
+
+    Parameters
+    ----------
+    positions : (N, 3) array of positions
+    epochs : (N,) array of Julian Dates
+    angle_threshold_deg : keep a point if the direction change exceeds this
+    min_points : always keep at least this many uniformly-spaced points
+    max_points : never return more than this many points
+
+    Returns
+    -------
+    (sampled_positions, sampled_epochs) — reduced arrays
+    """
+    n = len(positions)
+    if n <= min_points:
+        return positions, epochs
+
+    # Always keep first and last
+    keep = set()
+    keep.add(0)
+    keep.add(n - 1)
+
+    # Add uniformly-spaced baseline
+    step = max(1, n // min_points)
+    for i in range(0, n, step):
+        keep.add(i)
+
+    # Add points where curvature is high
+    threshold_rad = math.radians(angle_threshold_deg)
+    for i in range(1, n - 1):
+        d1 = positions[i] - positions[i - 1]
+        d2 = positions[i + 1] - positions[i]
+        n1 = np.linalg.norm(d1)
+        n2 = np.linalg.norm(d2)
+        if n1 > 1e-10 and n2 > 1e-10:
+            cos_angle = np.dot(d1, d2) / (n1 * n2)
+            cos_angle = np.clip(cos_angle, -1.0, 1.0)
+            angle = math.acos(cos_angle)
+            if angle > threshold_rad:
+                keep.add(i)
+
+    # Sort and limit
+    indices = sorted(keep)
+    if len(indices) > max_points:
+        step = len(indices) // max_points
+        indices = indices[::step]
+        if indices[-1] != n - 1:
+            indices.append(n - 1)
+
+    idx = np.array(indices)
+    return positions[idx], epochs[idx]
+
+
+def positions_to_scene(positions_km: np.ndarray) -> np.ndarray:
+    """Batch convert (N, 3) positions from km to scene units."""
+    return positions_km * (SCENE_SCALE / AU_KM)

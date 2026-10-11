@@ -1,0 +1,16 @@
+{
+  "name": "tars-frontend",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "build": "bun build.ts",
+    "start": "bun server.ts",
+    "dev": "bun run build && bun run start",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "elysia": "1.4.30",
+    "three": "0.164.1"
+  }
+}
