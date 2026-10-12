@@ -29,9 +29,11 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
+        {{- range .Values.networkPolicy.ingressNamespaceSelectors }}
         - namespaceSelector:
             matchLabels:
-              {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 14 }}
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

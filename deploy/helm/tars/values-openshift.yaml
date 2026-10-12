@@ -7,7 +7,8 @@ ingress:
     route.openshift.io/termination: edge          # HTTPS at the router (wildcard *.apps certificate)
     haproxy.router.openshift.io/timeout: 3600s    # long-lived ephemeris WebSocket
 networkPolicy:
-  ingressNamespaceSelector:
-    network.openshift.io/policy-group: ingress
+  ingressNamespaceSelectors:
+    - policy-group.network.openshift.io/ingress: ""        # router pods on the pod network
+    - policy-group.network.openshift.io/host-network: ""   # HostNetwork routers (bare metal, e.g. TechZone)
 config:
   trustedProxyHops: "1"        # the router appends one X-Forwarded-For entry

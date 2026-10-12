@@ -53,9 +53,9 @@ ingress:
 
 networkPolicy:
   enabled: true
-  # Namespace of the ingress controller allowed to reach the public services.
-  ingressNamespaceSelector:
-    kubernetes.io/metadata.name: kube-system   # IKS; OpenShift: network.openshift.io/policy-group: ingress
+  # Namespaces whose traffic may reach the public services (the ingress controller).
+  ingressNamespaceSelectors:
+    - kubernetes.io/metadata.name: kube-system   # IKS ALB
 
 topologySpread: true   # spread replicas across zones (topology.kubernetes.io/zone)
 
