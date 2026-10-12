@@ -29,7 +29,7 @@ Python microservices for the orbital mechanics and job pipeline, and a Three.js 
 | [`services/jobs/`](services/jobs/README.md) | Job API, outbox publisher, CPU worker, schema |
 | `services/Dockerfile` | One multi-target Dockerfile for all Python images |
 | `.github/` | CI/CD workflows (`ci.yml`, reusable `deploy.yml`) and Dependabot |
-| [`deploy/`](deploy/README.md) | Helm charts (`tars` app, `tars-data` in-cluster data services), OpenShift bootstrap, deployment runbook, [portability plan](deploy/PORTABILITY.md) |
+| [`deploy/`](deploy/README.md) | Helm charts (`tars` app, `tars-data` in-cluster data services), OpenShift bootstrap, deployment runbook |
 | [`infra/terraform/ibm/`](infra/terraform/ibm/README.md) | Terraform: platform (VPC, cluster, databases, storage, keys) and cluster bootstrap (namespace, secrets) |
 | [`packages/`](packages/README.md) | `tars_core` (numerical engine) and `tars_contracts` (wire contracts, clients) |
 | [`scripts/`](scripts/README.md) | Local setup and end-to-end verification |
@@ -152,7 +152,6 @@ All verified on the local Docker stack; nothing is deployed yet.
   - In-cluster data layer: CloudNativePG with 3 instances on separate nodes, Redis queue and cache, a NooBaa bucket.
   - Bootstrapped by script; CI deploys with a namespace-scoped token.
   - Checked: NooBaa enforces conditional writes (412), and the deployer can't act outside its namespace.
-- **Portability:** a documented path to EKS. The app layer stays unchanged; only values files, secrets, Terraform and CI login differ.
 
 ## License
 
@@ -176,28 +175,6 @@ This evolutionary algorithm computes a true Pareto front by evolving a populatio
 - **Intelligent Insights:** The optimizer records the initial feasible trajectory found in early generations and compares it against the final optimized result, providing natural-language insights (e.g., *"Saved 1.2 km/s by shifting departure 5 days earlier"*).
 - **Orbital Elements:** Cartesian state vectors are automatically converted into classical Keplerian elements ($a, e, i, \Omega, \omega, \nu$) at the optimal transfer point.
 - **Side-by-Side Comparison:** The API computes and returns the full 3D coordinates for both the initial and optimized orbits, allowing the frontend to render the physical orbital shift in real-time.
-
----
-
-## For the Nano Role
-
-### Scene coordinate system
-
-Backend returns ecliptic coordinates (km) converted to scene units (1 AU = 1000 units).
-Three.js mapping:
-```
-three.x = ecliptic.x
-three.y = ecliptic.z   (ecliptic Z becomes "up")
-three.z = -ecliptic.y  (flip for right-handed coords)
-```
-
-### Key API interactions
-
-All API calls go to `http://localhost:8000`. See the API Reference section below.
-
-The frontend connects two WebSockets:
-1. `/ws/ephemeris/stream` -- real-time planetary positions for animation
-2. `/ws/trajectory/{job_id}` -- optimization progress streaming
 
 ---
 

@@ -78,3 +78,6 @@ kubeconfig*
 *kubeconfig*.conf
 *.conf
 !**/nginx*.conf
+
+# Local planning notes (not published)
+deploy/PORTABILITY.md

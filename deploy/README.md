@@ -1,19 +1,10 @@
 # Deploying TARS to IBM Cloud
 
-Production runs on **Red Hat OpenShift on IBM Cloud** or **IBM Cloud Kubernetes Service (IKS)**: a multizone cluster, with managed data services kept outside the cluster.
+TARS runs on **Red Hat OpenShift** (IBM TechZone staging today, or Red Hat OpenShift on IBM Cloud) or **IBM Cloud Kubernetes Service (IKS)**. The data services are either in the cluster or managed by IBM Cloud.
 
-```
-                      ┌─────────────────────── cluster (3 zones) ───────────────────────┐
-browser ──HTTPS──► Ingress ─┬─ /                   → frontend   (2–4 pods)                 │
-                            ├─ /api/v1/ephemeris   → ephemeris  (2–6, WebSocket)          │
-                            ├─ /api/v1/trajectory  → trajectory (2–8, CPU)                │
-                            └─ /api/v1/jobs        → jobs API   (2–4)                     │
-                               outbox (2) · worker (2–6, CPU) · loader CronJob            │
-                      └──────────────────────────────┬───────────────────────────────────┘
-                              private endpoints only │
-          Databases for PostgreSQL · Databases for Redis ×2 (queue noeviction, cache LFU)
-          Cloud Object Storage (datasets, results; versioned) · Key Protect root key
-```
+![TARS on OpenShift: the router sends / and /api/v1 paths to the frontend, ephemeris, trajectory and jobs services in namespace tars; jobs admit work into CloudNativePG Postgres and enqueue it on Redis; the worker writes fenced results to Postgres and a NooBaa bucket that also holds the ephemeris datasets.](architecture.svg)
+
+This is the live staging topology, with in-cluster data services. On the managed IBM Cloud path, the data stores are Databases for PostgreSQL, Databases for Redis ×2 and Cloud Object Storage, reached over private endpoints, and the app layer is unchanged.
 
 | Layer | Where | Owned by |
 |---|---|---|
