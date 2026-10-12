@@ -1,8 +1,13 @@
-# Layer on top of staging/production values for Red Hat OpenShift on IBM Cloud:
-#   helm upgrade --install tars deploy/helm/tars -f values-production.yaml -f values-openshift.yaml
-platform: openshift
+# Layer on top of staging/production values for OpenShift (Red Hat OpenShift on IBM Cloud, TechZone, OCP):
+#   helm upgrade --install tars deploy/helm/tars -f values-staging.yaml -f values-openshift.yaml
+platform: openshift            # no fixed UIDs: the restricted-v2 SCC assigns one
 ingress:
-  className: ""
+  className: ""                # default router
+  annotations:
+    route.openshift.io/termination: edge          # HTTPS at the router (wildcard *.apps certificate)
+    haproxy.router.openshift.io/timeout: 3600s    # long-lived ephemeris WebSocket
 networkPolicy:
   ingressNamespaceSelector:
     network.openshift.io/policy-group: ingress
+config:
+  trustedProxyHops: "1"        # the router appends one X-Forwarded-For entry

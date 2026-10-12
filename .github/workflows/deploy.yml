@@ -3,11 +3,14 @@
 # GitHub environment (staging / production): its protection rules gate production, and
 # its secrets/variables keep cluster details out of the repository.
 #
-# Environment secret:   IBM_CLOUD_API_KEY   (Service ID key: Writer on the cluster namespace only)
-# Environment variables: IBM_REGION, IBM_RESOURCE_GROUP, IBM_CLUSTER, K8S_NAMESPACE,
-#   TARS_PLATFORM (kubernetes|openshift), TARS_HOST, TARS_INGRESS_CLASS, TARS_INGRESS_TLS_SECRET,
-#   TARS_S3_ENDPOINT, TARS_DATASET_BUCKET, TARS_RESULT_BUCKET, TARS_TRUSTED_PROXY_HOPS
-# The last four come from `terraform output helm_values` in infra/terraform/ibm/cluster.
+# Two ways to reach the cluster (environment variable DEPLOY_AUTH):
+#   token    — secrets OPENSHIFT_SERVER + OPENSHIFT_TOKEN: a ServiceAccount token with `admin` on the
+#              namespace only (created by deploy/openshift/bootstrap.sh). Any OpenShift/Kubernetes cluster.
+#   ibmcloud — secret IBM_CLOUD_API_KEY + variables IBM_REGION, IBM_RESOURCE_GROUP, IBM_CLUSTER (IKS/ROKS).
+# Environment variables: K8S_NAMESPACE, TARS_PLATFORM (kubernetes|openshift), TARS_HOST,
+#   TARS_INGRESS_CLASS, TARS_INGRESS_TLS_SECRET, TARS_S3_ENDPOINT, TARS_S3_CA_CONFIGMAP,
+#   TARS_DATASET_BUCKET, TARS_RESULT_BUCKET, TARS_TRUSTED_PROXY_HOPS
+# (printed by deploy/openshift/bootstrap.sh, or `terraform output helm_values` for the Terraform path).
 name: Deploy
 
 on:
@@ -44,11 +47,24 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.22.0
+      - name: Cluster login (namespace-scoped ServiceAccount token)
+        if: vars.DEPLOY_AUTH == 'token'
+        env:
+          SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+          TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+        run: |
+          kubectl config set-cluster target --server="$SERVER"
+          kubectl config set-credentials deployer --token="$TOKEN"
+          kubectl config set-context target --cluster=target --user=deployer --namespace="${{ vars.K8S_NAMESPACE }}"
+          kubectl config use-context target
+          kubectl auth can-i create deployments -n "${{ vars.K8S_NAMESPACE }}"
       - name: Install IBM Cloud CLI
+        if: vars.DEPLOY_AUTH != 'token'
         run: |
           curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
           ibmcloud plugin install container-service -f -q
-      - name: Log in and fetch cluster credentials
+      - name: Cluster login (IBM Cloud API key)
+        if: vars.DEPLOY_AUTH != 'token'
         env:
           IBMCLOUD_API_KEY: ${{ secrets.IBM_CLOUD_API_KEY }}
         run: |
@@ -60,7 +76,8 @@ jobs:
           registry=$(echo "$REGISTRY" | tr '[:upper:]' '[:lower:]')
           { echo "image: {registry: $registry}"; echo "images:"; } > "$RUNNER_TEMP/images.yaml"
           for image in ephemeris trajectory jobs worker frontend; do
-            digest=$(docker buildx imagetools inspect "$registry/$image:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
+            digest=$(docker buildx imagetools inspect "$registry/$image:$IMAGE_TAG" --format '{{.Manifest.Digest}}') \
+              || { echo "::error::$registry/$image:$IMAGE_TAG is not pullable anonymously. Make the GHCR package public (or add an image pull secret)."; exit 1; }
             echo "  $image: {digest: $digest}" >> "$RUNNER_TEMP/images.yaml"
           done
           cat "$RUNNER_TEMP/images.yaml"
@@ -76,8 +93,9 @@ jobs:
             --set ingress.host="${{ vars.TARS_HOST }}" \
             --set ingress.className="${{ vars.TARS_INGRESS_CLASS }}" \
             --set ingress.tlsSecretName="${{ vars.TARS_INGRESS_TLS_SECRET }}" \
-            --set config.region="${{ vars.IBM_REGION }}" \
+            --set config.region="${{ vars.TARS_S3_REGION || vars.IBM_REGION || 'us-east-1' }}" \
             --set config.s3EndpointUrl="${{ vars.TARS_S3_ENDPOINT }}" \
+            --set config.s3CaConfigMap="${{ vars.TARS_S3_CA_CONFIGMAP }}" \
             --set config.datasetBucket="${{ vars.TARS_DATASET_BUCKET }}" \
             --set config.resultBucket="${{ vars.TARS_RESULT_BUCKET }}" \
             --set config.trustedProxyHops="${{ vars.TARS_TRUSTED_PROXY_HOPS || '1' }}" \

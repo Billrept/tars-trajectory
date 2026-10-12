@@ -37,6 +37,8 @@ config:
   rateLimitPerMin: "5"
   rateLimitPerDay: "30"
   activeManifestTtlSeconds: "60"
+  s3CaConfigMap: ""            # e.g. openshift-service-ca.crt for NooBaa's in-cluster S3 endpoint
+  s3CaKey: service-ca.crt
   ephemerisStart: "2025-01-01"
   ephemerisEnd: "2060-01-01"
 

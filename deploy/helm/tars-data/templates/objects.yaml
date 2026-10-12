@@ -1,0 +1,11 @@
+# NooBaa creates the bucket plus a Secret (AWS_ACCESS_KEY_ID/SECRET) and a ConfigMap
+# (BUCKET_HOST/PORT/NAME) with this claim's name. Datasets and results share the bucket:
+# their key prefixes (datasets/, active.json vs attempts/, results/) never overlap.
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: {{ .Release.Name }}-objects
+  labels: {app.kubernetes.io/part-of: tars}
+spec:
+  storageClassName: {{ .Values.objects.storageClassName }}
+  generateBucketName: {{ .Values.objects.generateBucketName }}

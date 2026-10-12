@@ -71,3 +71,10 @@ crash.log
 backend.hcl
 *.tfvars
 !*.tfvars.example
+
+# Cluster credentials — never commit
+*.kubeconfig
+kubeconfig*
+*kubeconfig*.conf
+*.conf
+!**/nginx*.conf

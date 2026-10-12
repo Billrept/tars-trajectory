@@ -29,7 +29,7 @@ Python microservices for the orbital mechanics and job pipeline, and a Three.js 
 | [`services/jobs/`](services/jobs/README.md) | Job API, outbox publisher, CPU worker, schema |
 | `services/Dockerfile` | One multi-target Dockerfile for all Python images |
 | `.github/` | CI/CD workflows (`ci.yml`, reusable `deploy.yml`) and Dependabot |
-| [`deploy/`](deploy/README.md) | Helm chart for IKS and OpenShift, and the deployment runbook |
+| [`deploy/`](deploy/README.md) | Helm charts (`tars` app, `tars-data` in-cluster data services), OpenShift bootstrap, deployment runbook, [portability plan](deploy/PORTABILITY.md) |
 | [`infra/terraform/ibm/`](infra/terraform/ibm/README.md) | Terraform: platform (VPC, cluster, databases, storage, keys) and cluster bootstrap (namespace, secrets) |
 | [`packages/`](packages/README.md) | `tars_core` (numerical engine) and `tars_contracts` (wire contracts, clients) |
 | [`scripts/`](scripts/README.md) | Local setup and end-to-end verification |
@@ -148,6 +148,11 @@ All verified on the local Docker stack; nothing is deployed yet.
   - Staging and production deploy stages.
   - Redis TLS for managed instances, and the bootstrap packaged in the jobs image.
   - The chart installed on a local `kind` cluster under the `restricted` Pod Security Standard, and the full browser flow worked through an NGINX ingress.
+- **OpenShift staging (IBM TechZone, OCP 4.19):**
+  - In-cluster data layer: CloudNativePG with 3 instances on separate nodes, Redis queue and cache, a NooBaa bucket.
+  - Bootstrapped by script; CI deploys with a namespace-scoped token.
+  - Checked: NooBaa enforces conditional writes (412), and the deployer can't act outside its namespace.
+- **Portability:** a documented path to EKS. The app layer stays unchanged; only values files, secrets, Terraform and CI login differ.
 
 ## License
 

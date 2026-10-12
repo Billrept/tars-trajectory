@@ -38,12 +38,14 @@ spec:
         {{- include "tars.podSecurity" $root | nindent 8 }}
       {{- if $root.Values.topologySpread }}
       topologySpreadConstraints:
+        {{- range $key := list "topology.kubernetes.io/zone" "kubernetes.io/hostname" }}
         - maxSkew: 1
-          topologyKey: topology.kubernetes.io/zone
+          topologyKey: {{ $key }}
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
               {{- include "tars.selector" $ctx | nindent 14 }}
+        {{- end }}
       {{- end }}
       containers:
         - name: {{ $name }}

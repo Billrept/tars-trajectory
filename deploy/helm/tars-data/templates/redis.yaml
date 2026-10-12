@@ -1,0 +1,86 @@
+{{- $secretName := printf "%s-redis" .Release.Name }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels: {app.kubernetes.io/part-of: tars}
+  annotations: {helm.sh/resource-policy: keep}   # keep the password across upgrades and uninstalls
+type: Opaque
+data:
+  password: {{ if $existing }}{{ index $existing.data "password" }}{{ else }}{{ randAlphaNum 40 | b64enc }}{{ end }}
+{{- range $role := list "queue" "cache" }}
+{{- $r := index $.Values.redis $role }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $.Release.Name }}-redis-{{ $role }}
+  labels: {app.kubernetes.io/part-of: tars, app.kubernetes.io/name: redis-{{ $role }}}
+spec:
+  serviceName: {{ $.Release.Name }}-redis-{{ $role }}
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: redis-{{ $role }}, app.kubernetes.io/instance: {{ $.Release.Name }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: tars, app.kubernetes.io/name: redis-{{ $role }}, app.kubernetes.io/instance: {{ $.Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: redis
+          image: {{ $.Values.redis.image }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ $secretName }}, key: password}}
+          args:
+            - run-redis
+            - --maxmemory-policy
+            - {{ $r.maxmemoryPolicy }}
+            {{- if $r.maxmemory }}
+            - --maxmemory
+            - {{ $r.maxmemory }}
+            {{- end }}
+            {{- if $r.persistence }}
+            - --appendonly
+            - "yes"
+            {{- else }}
+            - --save
+            - ""
+            {{- end }}
+          ports: [{name: redis, containerPort: 6379}]
+          readinessProbe: {tcpSocket: {port: redis}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: redis}, periodSeconds: 20}
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/redis/data}
+      {{- if not $r.persistence }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if $r.persistence }}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: {{ $r.persistence.size }}}}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-redis-{{ $role }}
+  labels: {app.kubernetes.io/part-of: tars}
+spec:
+  selector: {app.kubernetes.io/name: redis-{{ $role }}, app.kubernetes.io/instance: {{ $.Release.Name }}}
+  ports: [{name: redis, port: 6379, targetPort: redis}]
+{{- end }}

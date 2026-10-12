@@ -1,0 +1,35 @@
+# Platform layer, installed once by a cluster admin (deploy/openshift/bootstrap.sh), not by CI.
+# Use when the cluster's account can't provision managed databases (e.g. IBM TechZone).
+
+postgres:
+  instances: 3                  # 1 primary + 2 streaming replicas; the operator fails over automatically
+  image: ghcr.io/cloudnative-pg/postgresql:16
+  storageSize: 10Gi
+  storageClass: ""              # "" = cluster default (ODF Ceph RBD)
+  database: tars
+  owner: tars
+  resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
+
+redis:
+  image: registry.redhat.io/rhel9/redis-7
+  # One instance each is deliberate: PostgreSQL is the source of truth. If the queue is lost, the
+  # outbox reconciler re-enqueues unfinished jobs from the database within 30 s; the cache is disposable.
+  queue:
+    maxmemoryPolicy: noeviction
+    persistence: {size: 2Gi}    # AOF on a PVC so a restart keeps queued work
+    resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+  cache:
+    maxmemoryPolicy: allkeys-lfu
+    maxmemory: 256mb
+    resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 500m, memory: 384Mi}}
+
+objects:
+  storageClassName: openshift-storage.noobaa.io   # NooBaa / Multicloud Object Gateway
+  generateBucketName: tars
+
+# Which pods may connect to the data services (the app release in the same namespace) and the
+# namespace of the CloudNativePG operator (it must reach the instances).
+networkPolicy:
+  enabled: true
+  appInstance: tars
+  operatorNamespace: openshift-operators

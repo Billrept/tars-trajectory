@@ -1,0 +1,40 @@
+{{- if .Values.networkPolicy.enabled }}
+# Data pods accept connections only from the TARS app pods, from each other (replication),
+# and from the CloudNativePG operator.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-data-access
+  labels: {app.kubernetes.io/part-of: tars}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [redis-queue, redis-cache]}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Values.networkPolicy.appInstance }}}
+      ports: [{port: 6379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-postgres-access
+  labels: {app.kubernetes.io/part-of: tars}
+spec:
+  podSelector:
+    matchLabels: {cnpg.io/cluster: {{ .Release.Name }}-pg}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Values.networkPolicy.appInstance }}}
+      ports: [{port: 5432}]
+    - from:
+        - podSelector:
+            matchLabels: {cnpg.io/cluster: {{ .Release.Name }}-pg}
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.operatorNamespace }}}
+{{- end }}

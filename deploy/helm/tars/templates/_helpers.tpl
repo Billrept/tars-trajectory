@@ -59,6 +59,9 @@ capabilities:
 - {name: CREATE_BUCKETS, value: "0"}
 - {name: QUEUE_REDIS_CA_CERT, value: /etc/tars/certs/queue-redis-ca.crt}
 - {name: CACHE_REDIS_CA_CERT, value: /etc/tars/certs/cache-redis-ca.crt}
+{{- with .Values.config.s3CaConfigMap }}
+- {name: AWS_CA_BUNDLE, value: /etc/tars/s3-ca/{{ $.Values.config.s3CaKey }}}
+{{- end }}
 - {name: NUMBA_CACHE_DIR, value: /tmp/numba}
 - {name: HOME, value: /tmp}
 {{- end }}
@@ -75,9 +78,17 @@ capabilities:
   secret:
     secretName: {{ .Values.secrets.caCerts }}
     defaultMode: 0444
+{{- with .Values.config.s3CaConfigMap }}
+- name: s3-ca
+  configMap:
+    name: {{ . }}
+{{- end }}
 {{- end }}
 
 {{- define "tars.volumeMounts" -}}
 - {name: tmp, mountPath: /tmp}
 - {name: ca-certs, mountPath: /etc/tars/certs, readOnly: true}
+{{- if .Values.config.s3CaConfigMap }}
+- {name: s3-ca, mountPath: /etc/tars/s3-ca, readOnly: true}
+{{- end }}
 {{- end }}

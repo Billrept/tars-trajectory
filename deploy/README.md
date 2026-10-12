@@ -23,6 +23,32 @@ browser ──HTTPS──► Ingress ─┬─ /                   → frontend 
 
 Credentials never pass through Helm values. The chart only references the `tars-runtime` and `tars-ca-certs` secrets by name.
 
+## Two ways to provide the data services
+
+| Path | When | Postgres / Redis / object storage | Cluster access for CI |
+|---|---|---|---|
+| **Managed IBM Cloud** (`infra/terraform/ibm`) | Your own IBM Cloud account | Databases for PostgreSQL, Databases for Redis ×2, Cloud Object Storage | `DEPLOY_AUTH` unset: IBM Cloud API key |
+| **In-cluster on OpenShift** (`deploy/openshift/bootstrap.sh` + `deploy/helm/tars-data`) | A cluster where you can't create managed services, e.g. IBM TechZone | CloudNativePG (3 instances, one per node, automatic failover, verified TLS), Redis queue (AOF on a PVC) and cache, NooBaa bucket | `DEPLOY_AUTH=token`: a ServiceAccount token with `admin` on the namespace only |
+
+In-cluster bootstrap, run once with a cluster-admin kubeconfig:
+
+```bash
+KUBECONFIG=~/.kube/<admin>.conf deploy/openshift/bootstrap.sh
+```
+
+The script:
+1. Installs the certified CloudNativePG operator.
+2. Deploys `tars-data`.
+3. Builds `tars-runtime` and `tars-ca-certs` from the operator-generated credentials.
+4. Creates the `tars-deployer` ServiceAccount.
+5. Prints the GitHub environment settings. It never prints secret values.
+
+The admin kubeconfig stays on your machine; CI only ever gets the namespace-scoped token.
+
+Why the in-cluster Redis instances run as one replica each: **PostgreSQL is the source of truth.** If the queue is lost, the outbox reconciler re-sends unfinished jobs from the database within 30 s, and the cache is disposable. Postgres itself is HA.
+
+**Open item:** CloudNativePG backups aren't configured yet. The cluster's snapshot class targets a different Ceph cluster. The next step is the Barman Cloud plugin, writing base backups and WAL to the NooBaa bucket for point-in-time recovery.
+
 ## What the chart does
 
 - **Two-plus replicas everywhere in production.** Pods spread across zones, with a PodDisruptionBudget of `minAvailable: 1`, rolling updates with `maxUnavailable: 0`, and CPU autoscalers that wait 5 minutes before scaling down.

@@ -49,6 +49,8 @@ spec:
   backoffLimit: 3
   activeDeadlineSeconds: 600
   template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: tars, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: bootstrap}
     spec:
       {{- include "tars.batchPod" (dict "root" $root "name" "bootstrap" "image" "jobs" "command" (list "python" "-m" "jobs_service.bootstrap")) | nindent 6 }}
 {{- end }}
@@ -68,6 +70,8 @@ spec:
   backoffLimit: 2
   activeDeadlineSeconds: {{ .Values.loader.activeDeadlineSeconds }}
   template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: tars, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: loader}
     spec:
       {{- include "tars.batchPod" (dict "root" $root "name" "loader" "image" "ephemeris" "command" (list "python" "-m" "ephemeris_service.loader")) | nindent 6 }}
 {{- end }}
@@ -88,5 +92,7 @@ spec:
       backoffLimit: 2
       activeDeadlineSeconds: {{ .Values.loader.activeDeadlineSeconds }}
       template:
+        metadata:
+          labels: {app.kubernetes.io/part-of: tars, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: loader}
         spec:
           {{- include "tars.batchPod" (dict "root" $root "name" "loader" "image" "ephemeris" "command" (list "python" "-m" "ephemeris_service.loader")) | nindent 10 }}

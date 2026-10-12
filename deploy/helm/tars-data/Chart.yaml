@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tars-data
+description: In-cluster data services for TARS on OpenShift — CloudNativePG Postgres (HA), Redis queue and cache, NooBaa object bucket.
+type: application
+version: 0.1.0
+kubeVersion: ">=1.27.0-0"

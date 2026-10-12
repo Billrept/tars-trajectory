@@ -99,17 +99,24 @@ jobs:
           version: v3.22.0
       - name: Helm lint and render every values combination
         run: |
-          chart=deploy/helm/tars; mkdir -p rendered
+          chart=deploy/helm/tars; mkdir -p rendered rendered-crd
           helm lint "$chart" -f "$chart/values-production.yaml"
           helm template tars "$chart" > rendered/default.yaml
           helm template tars "$chart" -f "$chart/values-staging.yaml" > rendered/staging.yaml
           helm template tars "$chart" -f "$chart/values-production.yaml" > rendered/production.yaml
           helm template tars "$chart" -f "$chart/values-production.yaml" -f "$chart/values-openshift.yaml" > rendered/openshift.yaml
+          helm lint deploy/helm/tars-data
+          helm template tars-data deploy/helm/tars-data > rendered-crd/data.yaml
       - name: Validate rendered manifests (kubeconform, strict)
         run: >
           docker run --rm -v "$PWD/rendered:/r"
           ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
           -strict -summary -kubernetes-version 1.30.0 /r/default.yaml /r/staging.yaml /r/production.yaml /r/openshift.yaml
+      - name: Validate the data chart (operator CRDs such as CloudNativePG Cluster are skipped)
+        run: >
+          docker run --rm -v "$PWD/rendered-crd:/r"
+          ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
+          -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0 /r/data.yaml
 
   images:
     name: Image ${{ matrix.image }}
